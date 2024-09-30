@@ -27,8 +27,9 @@ async def generateItinerary(userItinerary: UserItinerary):
         f"- An address for geocoding"
         f"- A short description of the location. "
         f"After the itinerary itself, include a section for a budget breakdown. For consistent formatting, your response will be parsed for the keywords "
-        f"'Address: ' and 'Description: '."
-        f"All keywords MUST be preceded by two asterisks, and followed by a colon, two asterisks, and a space. Example: **Address:** ")
+        f"'Name: ', 'Address: ', and 'Description: '."
+        f"All keywords MUST be preceded by two asterisks, and followed by a colon, two asterisks, and a space. Example: **Address:** "
+        f"In addition, keep the formatting consistent by using a single hyphen for lists. Do not nest 'Name:' or any other (**) keywords within lists (-).")
 
     userPrompt = (
         f"Generate a travel itinerary for {userItinerary.duration} days, "
@@ -44,7 +45,7 @@ async def generateItinerary(userItinerary: UserItinerary):
                 {"role": "system", "content": systemPrompt},
                 {"role": "user", "content": userPrompt}
             ],
-            max_tokens=1000,
+            max_tokens=500,
             temperature=0.7
         )
     except Exception as e:
