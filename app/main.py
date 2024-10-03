@@ -52,7 +52,6 @@ async def generateItinerary(userItinerary: UserItinerary):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    print(f"rawresponse {response}")
 
     # Extract itinerary content from response
     itineraryContent = response.choices[0].message.content
@@ -64,13 +63,28 @@ async def generateItinerary(userItinerary: UserItinerary):
     # Get coordinates of addresses
     coordinates = await geocodeLocations(addresses)
 
+    # Places 
+    places = []
+
+    # Assign attributes to each place
+    for id, (address, coordinate) in enumerate(zip(addresses, coordinates)):
+        place = {
+            "id": id,
+            "address": address,
+            "coordinates": coordinate
+        }
+
+        places.append(place)
+
     # Prepare response data
     response_data = {
         "itinerary": itineraryContent,
-        'addresses': addresses,
-        "coordinates": coordinates
+        #'addresses': addresses,
+        #"coordinates": coordinates
+        "places": places
     }
 
+    print(response_data)
     # Return formatted response
     return response_data
 
