@@ -22,13 +22,16 @@ async def generateItinerary(userItinerary: UserItinerary):
         f"You are a helpful travel agent. You will be generating a highly specific itinerary based on parameters provided by the user. "
         f"The itinerary will be organized per day. Do not include any destinations in the origin, but dedicate the first and last days of "
         f"the itinerary to travel from origin to first the destination, and the final destination back to the origin, respectively. "
-        f"For each location you recommend to visit, the following must be included: "
-        f"- The name of the location"
-        f"- An address for geocoding"
-        f"- A short description of the location. "
-        f"After the itinerary itself, include a section for a budget breakdown. For consistent formatting, your response will be parsed for the keywords "
-        f"'Address: ' and 'Description: '."
-        f"All keywords MUST be preceded by two asterisks, and followed by a colon, two asterisks, and a space. Example: **Address:** ")
+        f"For each location you recommend to visit, the following must be included in **separate lines**: "
+        f"- **Name** of the location (always start with Name:)."
+        f"- **Address** for geocoding."
+        f"- **Description** of the location."
+        f"After the itinerary itself, include a section for a budget breakdown. Ensure the following formatting rules: "
+        f"- The keywords **Name:**, **Address:**, and **Description:** must **always be on separate lines**."
+        f"- **Never** nest 'Name:', 'Address:', or 'Description:' within a hyphenated list. These should always start a new line and be outside of any lists. "
+        f"- Avoid combining these keywords with other sentences."
+        f"Maintain consistent formatting throughout the entire itinerary. Use a single hyphen only for general list items, "
+        f"such as describing activities or locations visited, but not for the **Name**, **Address**, or **Description** sections.")
 
     userPrompt = (
         f"Generate a travel itinerary for {userItinerary.duration} days, "
@@ -44,7 +47,7 @@ async def generateItinerary(userItinerary: UserItinerary):
                 {"role": "system", "content": systemPrompt},
                 {"role": "user", "content": userPrompt}
             ],
-            max_tokens=1000,
+            max_tokens=500,
             temperature=0.7
         )
     except Exception as e:
