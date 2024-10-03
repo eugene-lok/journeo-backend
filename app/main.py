@@ -56,6 +56,11 @@ async def generateItinerary(userItinerary: UserItinerary):
     # Extract itinerary content from response
     itineraryContent = response.choices[0].message.content
     print(f"content {itineraryContent}")
+
+    # Find all names in response
+    namePattern = r"\*\*Name:\*\*\s(.*?)(?=\n)"
+    names: list[str] = re.findall(namePattern, itineraryContent)
+
     # Find all addresses in response
     addressPattern = r"\*\*Address:\*\*\s(.*?)(?=\n)"
     addresses: list[str] = re.findall(addressPattern, itineraryContent)
@@ -67,9 +72,10 @@ async def generateItinerary(userItinerary: UserItinerary):
     places = []
 
     # Assign attributes to each place
-    for id, (address, coordinate) in enumerate(zip(addresses, coordinates)):
+    for id, (name, address, coordinate) in enumerate(zip(names, addresses, coordinates)):
         place = {
             "id": id,
+            "name": name,
             "address": address,
             "coordinates": coordinate
         }
@@ -79,8 +85,6 @@ async def generateItinerary(userItinerary: UserItinerary):
     # Prepare response data
     response_data = {
         "itinerary": itineraryContent,
-        #'addresses': addresses,
-        #"coordinates": coordinates
         "places": places
     }
 
