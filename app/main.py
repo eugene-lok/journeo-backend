@@ -2,6 +2,7 @@ from openai import OpenAI
 from fastapi import FastAPI, HTTPException
 from app.models import UserItinerary
 from app.middleware import addCorsMiddleware
+from app.auth import authRouter
 import os
 import re
 import httpx
@@ -11,6 +12,9 @@ app = FastAPI()
 
 # Apply CORS middleware
 addCorsMiddleware(app)
+
+# Add router
+app.include_router(authRouter)
 
 # Generates itinerary and fetches coordinates
 @app.post("/api/generateItinerary/")
