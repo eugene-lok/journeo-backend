@@ -1,7 +1,12 @@
 from openai import OpenAI
 from fastapi import FastAPI, HTTPException
-from app.models import UserItinerary
+from fastapi.responses import JSONResponse
+from app.models import UserItinerary, UserMessage
 from app.middleware import addCorsMiddleware
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, SystemMessagePromptTemplate
+
+#from app.auth import authRouter
 import os
 import re
 import httpx
@@ -11,6 +16,62 @@ app = FastAPI()
 
 # Apply CORS middleware
 addCorsMiddleware(app)
+
+# Add router
+#app.include_router(authRouter)
+
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    temperature=0.7,
+    max_tokens=500,
+    timeout=None,
+    max_retries=2,
+    api_key=os.getenv("OPENAI_API_KEY")
+)
+    
+@app.post("/api/chat/")
+async def chat_endpoint(message: UserMessage):
+
+    systemPrompt = (
+    f"You are a travel agent. Your job is to generate a complete itinerary based on the user’s input. "
+    f"You must continue the conversation until the user provides all of the following information:\n"
+    f"- Trip duration (days)\n"
+    f"- Trip origin\n"
+    f"- Trip destination (a single city or country)\n"
+    f"- Trip budget\n\n"
+    f"Once these inputs are received, you must generate the itinerary immediately without asking further questions. **Do not confirm or clarify anything.**"
+    f"\n\nThe structure of the itinerary must follow this format:\n"
+    f"1. Title it 'Your Itinerary'. **Do not use this phrase elsewhere.**\n"
+    f"2. Organize the itinerary by days. The first and last days are for travel:\n"
+    f"   - First day: Travel from the origin to the destination.\n"
+    f"   - Last day: Travel back from the destination to the origin.\n"
+    f"3. For each location you suggest, use the following mandatory format:\n"
+    f"   - **Name:** [Always start with this]\n"
+    f"   - **Address:** [This must be on a new line]\n"
+    f"   - **Description:** [Provide a brief description]\n\n"
+    f"After the itinerary, include a 'Budget Breakdown' section.\n\n"
+    f"Under no circumstances should you:\n"
+    f"- Ask for additional information or preferences after all inputs are received.\n"
+    f"- Confirm or clarify information provided by the user.\n"
+    f"- Delay generating the itinerary."
+)
+    
+    try:
+        systemMessage = SystemMessagePromptTemplate.from_template(systemPrompt)
+        humanMessage = HumanMessagePromptTemplate.from_template("{input}")
+        prompt = ChatPromptTemplate.from_messages([systemMessage, humanMessage])
+
+        # Generate the response using the chain
+        chain = prompt | llm
+        response = chain.invoke({"input": message.input})
+
+        botResponse = {"response": response.content}  
+
+        return JSONResponse(content=botResponse)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
 
 # Generates itinerary and fetches coordinates
 @app.post("/api/generateItinerary/")
