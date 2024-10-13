@@ -12,16 +12,27 @@ authRouter = APIRouter()
 @authRouter.post("/api/signup")
 async def signup(email: str, password: str):
     response = supabase.auth.sign_up({"email": email, "password": password})
-    if response.get('error'):
-        raise HTTPException(status_code=400, detail=response['error']['message'])
+    """ if response('error'):
+        raise HTTPException(status_code=400, detail=response['error']['message']) """
     return {"message": "User signed up successfully"}
 
 @authRouter.post("/api/login")
 async def login(email: str, password: str):
-    response = supabase.auth.sign_in_with_password({"email": email, "password": password})
-    if response.get('error'):
-        raise HTTPException(status_code=400, detail=response['error']['message'])
-    return {"message": "Logged in successfully", "access_token": response['data']['access_token']}
+    response = supabase.auth.sign_in_with_password({
+    "email": email,
+    "password": password
+    })
+
+    """ if response.error:
+        raise HTTPException(status_code=400, detail=response.error.message)
+
+    if not response.session or not response.session.access_token:
+        raise HTTPException(status_code=500, detail="Failed to retrieve access token.")
+ """
+    return {
+        "message": "Logged in successfully",
+        "access_token": response.session.access_token
+    }
 
 @authRouter.post("/api/logout")
 async def logout():
