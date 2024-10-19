@@ -33,29 +33,29 @@ llm = ChatOpenAI(
 async def chat_endpoint(message: UserMessage):
 
     systemPrompt = (
-    f"You are a travel agent. Your job is to generate a complete itinerary based on the user’s input. "
-    f"You must continue the conversation until the user provides all of the following information:\n"
-    f"- Trip duration (days)\n"
-    f"- Trip origin\n"
-    f"- Trip destination (a single city or country)\n"
-    f"- Trip budget\n\n"
-    f"Once these inputs are received, you must generate the itinerary immediately without asking further questions. **Do not confirm or clarify anything.**"
-    f"\n\nThe structure of the itinerary must follow this format:\n"
-    f"1. Title it 'Your Itinerary'. **Do not use this phrase elsewhere.**\n"
-    f"2. Organize the itinerary by days. The first and last days are for travel:\n"
-    f"   - First day: Travel from the origin to the destination.\n"
-    f"   - Last day: Travel back from the destination to the origin.\n"
-    f"3. For each location you suggest, use the following mandatory format:\n"
-    f"   - **Name:** [Always start with this]\n"
-    f"   - **Address:** [This must be on a new line]\n"
-    f"   - **Description:** [Provide a brief description]\n\n"
-    f"After the itinerary, include a 'Budget Breakdown' section.\n\n"
-    f"Under no circumstances should you:\n"
-    f"- Ask for additional information or preferences after all inputs are received.\n"
-    f"- Confirm or clarify information provided by the user.\n"
-    f"- Delay generating the itinerary."
-)
-    
+        f"You are a travel agent. Your job is to generate a complete itinerary based on the user’s input. "
+        f"You must continue the conversation until the user provides all of the following information:\n"
+        f"- Trip duration (days)\n"
+        f"- Trip origin\n"
+        f"- Trip destination (a single city or country)\n"
+        f"- Trip budget\n\n"
+        f"Once these inputs are received, you must generate the itinerary immediately without asking further questions. **Do not confirm or clarify anything.**"
+        f"\n\nThe structure of the itinerary must follow this format:\n"
+        f"1. Title it 'Your Itinerary'. **Do not use this phrase elsewhere.**\n"
+        f"2. Organize the itinerary by days. The first and last days are for travel:\n"
+        f"   - First day: Travel from the origin to the destination.\n"
+        f"   - Last day: Travel back from the destination to the origin.\n"
+        f"3. For each location you suggest, use the following mandatory format:\n"
+        f"   - **Name:** [Always start with this]\n"
+        f"   - **Address:** [This must be on a new line]\n"
+        f"   - **Description:** [Provide a brief description]\n\n"
+        f"After the itinerary, include a 'Budget Breakdown' section.\n\n"
+        f"Under no circumstances should you:\n"
+        f"- Ask for additional information or preferences after all inputs are received.\n"
+        f"- Confirm or clarify information provided by the user.\n"
+        f"- Delay generating the itinerary."
+    )
+
     try:
         systemMessage = SystemMessagePromptTemplate.from_template(systemPrompt)
         humanMessage = HumanMessagePromptTemplate.from_template("{input}")
@@ -65,11 +65,11 @@ async def chat_endpoint(message: UserMessage):
         chain = prompt | llm
         response = chain.invoke({"input": message.input})
 
-        botResponse = {"response": response.content}  
+        itineraryContent = response.content
 
-        if ("Your Itinerary" in response.content):
+        # Check if the response contains the itinerary
+        if "Your Itinerary" in itineraryContent:
             # Extract itinerary content from response
-            itineraryContent = response.choices[0].message.content
             print(f"content {itineraryContent}")
 
             # Find all names in response
@@ -83,7 +83,7 @@ async def chat_endpoint(message: UserMessage):
             # Get coordinates of addresses
             coordinates = await geocodeLocations(addresses)
 
-            # Places 
+            # Places
             places = []
 
             # Assign attributes to each place
@@ -94,7 +94,6 @@ async def chat_endpoint(message: UserMessage):
                     "address": address,
                     "coordinates": coordinate
                 }
-
                 places.append(place)
 
             # Prepare response data
@@ -106,7 +105,9 @@ async def chat_endpoint(message: UserMessage):
             print(response_data)
             # Return formatted response
             return response_data
-        
+
+        # Return the raw response if it doesn't match the expected format
+        botResponse = {"response": response.content}
         return JSONResponse(content=botResponse)
 
     except Exception as e:
