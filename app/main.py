@@ -22,8 +22,8 @@ addCorsMiddleware(app)
 
 llm = ChatOpenAI(
     model="gpt-4o-mini",
-    temperature=0.7,
-    max_tokens=500,
+    temperature=0.8,
+    max_tokens=700,
     timeout=None,
     max_retries=2,
     api_key=os.getenv("OPENAI_API_KEY")
@@ -35,10 +35,10 @@ async def chat_endpoint(message: UserMessage):
     systemPrompt = (
         f"You are a travel agent. Your job is to generate a complete itinerary based on the user’s input. "
         f"You must continue the conversation until the user provides all of the following information:\n"
-        f"- Trip duration (days)\n"
-        f"- Trip origin\n"
-        f"- Trip destination (a single city or country)\n"
-        f"- Trip budget\n\n"
+        f"- Duration (days)\n"
+        f"- Origin\n"
+        f"- Destination (a single city or country)\n"
+        f"- Budget\n\n"
         f"Once these inputs are received, you must generate the itinerary immediately without asking further questions. **Do not confirm or clarify anything.**"
         f"\n\nThe structure of the itinerary must follow this format:\n"
         f"1. Title it 'Your Itinerary'. **Do not use this phrase elsewhere.**\n"
@@ -52,7 +52,6 @@ async def chat_endpoint(message: UserMessage):
         f"After the itinerary, include a 'Budget Breakdown' section.\n\n"
         f"Under no circumstances should you:\n"
         f"- Ask for additional information or preferences after all inputs are received.\n"
-        f"- Confirm or clarify information provided by the user.\n"
         f"- Delay generating the itinerary."
     )
 
@@ -97,16 +96,17 @@ async def chat_endpoint(message: UserMessage):
                 places.append(place)
 
             # Prepare response data
-            response_data = {
+            responseData = {
                 "itinerary": itineraryContent,
                 "places": places
             }
 
-            print(response_data)
+            print(responseData)
             # Return formatted response
-            return response_data
+            botResponse = {"response": response.content}
+            return JSONResponse(content=botResponse)
 
-        # Return the raw response if it doesn't match the expected format
+        # Return raw response 
         botResponse = {"response": response.content}
         return JSONResponse(content=botResponse)
 
