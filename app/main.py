@@ -35,13 +35,13 @@ async def chat_endpoint(message: UserMessage):
     systemPrompt = (
         f"You are a travel agent. Your job is to generate a complete itinerary based on the user’s input. "
         f"You must continue the conversation until the user provides all of the following information:\n"
-        f"- Duration (days)\n"
-        f"- Origin\n"
-        f"- Destination (a single city or country)\n"
-        f"- Budget\n\n"
+        f"- Trip duration (phrased as 'X days', 'X-day trip', 'a week', or 'from date A to date B')\n"
+        f"- Trip origin (phrased as 'from X', 'starting in X', or 'origin is X')\n"
+        f"- Trip destination (phrased as 'to X', 'destination is X', or 'visit X')\n"
+        f"- Trip budget (phrased as '$X', 'a budget of X', or 'around X')\n\n"
         f"Once these inputs are received, you must generate the itinerary immediately without asking further questions. **Do not confirm or clarify anything.**"
         f"\n\nThe structure of the itinerary must follow this format:\n"
-        f"1. Title it 'Your Itinerary'. **Do not use this phrase elsewhere.**\n"
+        f"1. Title it 'Your Itinerary'. **This is mandatory. Do not use this phrase elsewhere.**\n"
         f"2. Organize the itinerary by days. The first and last days are for travel:\n"
         f"   - First day: Travel from the origin to the destination.\n"
         f"   - Last day: Travel back from the destination to the origin.\n"
@@ -54,6 +54,7 @@ async def chat_endpoint(message: UserMessage):
         f"- Ask for additional information or preferences after all inputs are received.\n"
         f"- Delay generating the itinerary."
     )
+
 
     try:
         systemMessage = SystemMessagePromptTemplate.from_template(systemPrompt)
@@ -103,7 +104,7 @@ async def chat_endpoint(message: UserMessage):
 
             print(responseData)
             # Return formatted response
-            botResponse = {"response": response.content}
+            botResponse = {"response": responseData}
             return JSONResponse(content=botResponse)
 
         # Return raw response 
