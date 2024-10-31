@@ -5,3 +5,6 @@ class UserItinerary(BaseModel):
     destinations: list[str]
     duration: int
     budget: int
+
+class UserMessage(BaseModel):
+    input: str

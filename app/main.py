@@ -1,7 +1,13 @@
 from openai import OpenAI
 from fastapi import FastAPI, HTTPException
-from app.models import UserItinerary
+from fastapi.responses import JSONResponse
+from app.models import UserItinerary, UserMessage
 from app.middleware import addCorsMiddleware
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, SystemMessagePromptTemplate, MessagesPlaceholder
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+#from app.auth import authRouter
 import os
 import re
 import httpx
@@ -11,6 +17,141 @@ app = FastAPI()
 
 # Apply CORS middleware
 addCorsMiddleware(app)
+
+# Add router
+#app.include_router(authRouter)
+
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    temperature=0.7,
+    max_tokens=1000,
+    timeout=None,
+    max_retries=2,
+    api_key=os.getenv("OPENAI_API_KEY")
+)
+
+systemPrompt = (
+        f"You are a travel agent. Your job is to generate a complete itinerary based on the user’s input. "
+        f"Your goal is to gather the following information from the user:\n"
+        f"- **Trip duration** (phrased as 'X days', 'X-day trip', 'a week', or 'from date A to date B').\n"
+        f"- **Trip origin** (phrased as 'from X', 'starting in X', or 'origin is X').\n"
+        f"- **Trip destination** (phrased as 'to X', 'destination is X', or 'visit X').\n"
+        f"- **Trip budget** (phrased as '$X', 'a budget of X', or 'around X').\n\n"
+
+        f"### Duration Handling:\n"
+        f"**If the user specifies the duration in any form (e.g., 'X days', 'a week', or a range like 'from date A to date B'), assume the duration is complete and do not ask for it again.**\n\n"
+
+        f"### Origin Handling:\n"
+        f"**If the user specifies the origin with phrases like 'from X', 'starting in X', or 'origin is X', assume the origin is complete and do not ask for it again.**\n\n"
+
+        f"### Destination Handling:\n"
+        f"**If the user specifies the destination with phrases like 'to X', 'destination is X', or 'visit X', assume the destination is complete and do not ask for it again.**\n\n"
+
+        f"### Budget Handling:\n"
+        f"**If the user specifies the budget with phrases like '$X', 'a budget of X', or 'around X', assume the budget is complete and do not ask for it again.**\n\n"
+
+        f"### Completion Handling:\n"
+        f"Once the user provides all four parameters (trip duration, origin, destination, and budget), you must generate the itinerary immediately without asking further questions or clarifying anything. "
+        f"Do not delay generating the itinerary once all the information has been gathered.\n\n"
+
+        f"### Itinerary Format:\n"
+        f"1. Title it 'Your Itinerary'. **This is mandatory. Do not use this phrase elsewhere.**\n"
+        f"2. Organize the itinerary by days. The first and last days are for travel:\n"
+        f"   - First day: Travel from the origin to the destination.\n"
+        f"   - Last day: Travel back from the destination to the origin.\n"
+        f"3. For each location you suggest, use the following mandatory format:\n"
+        f"   - **Name:** [Always start with this]\n"
+        f"   - **Address:** [This must be on a new line]\n"
+        f"   - **Description:** [Provide a brief description]\n\n"
+        f"After the itinerary, include a 'Budget Breakdown' section.\n\n"
+        f"Under no circumstances should you:\n"
+        f"- Ask for additional information or preferences after all inputs are received.\n"
+        f"- Delay generating the itinerary."
+)
+
+systemMessage = SystemMessagePromptTemplate.from_template(systemPrompt)
+messageHistory = MessagesPlaceholder(variable_name="messages")
+messagesList = []
+    
+@app.post("/api/chat/")
+async def chatResponse(message: UserMessage):
+
+    try:
+        humanMessage = HumanMessagePromptTemplate.from_template("{input}")
+        
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                systemMessage, 
+                humanMessage,
+                messageHistory           
+            ]
+        )
+
+        # Add human message in message list
+        messagesList.append(HumanMessage(content=message.input))
+
+        # Generate the response using the chain
+        chain = prompt | llm
+
+        response = chain.invoke(
+            {
+                "input": message.input, 
+                "messages": messagesList
+            }
+        )
+
+        itineraryContent = response.content
+
+        # Store response in message list
+        messagesList.append(AIMessage(content=response.content))
+
+        # Check if the response contains the itinerary
+        if "Your Itinerary" in itineraryContent:
+            # Extract itinerary content from response
+            print(f"content {itineraryContent}")
+
+            # Find all names in response
+            namePattern = r"\*\*Name:\*\*\s(.*?)(?=\n)"
+            names: list[str] = re.findall(namePattern, itineraryContent)
+
+            # Find all addresses in response
+            addressPattern = r"\*\*Address:\*\*\s(.*?)(?=\n)"
+            addresses: list[str] = re.findall(addressPattern, itineraryContent)
+
+            # Get coordinates of addresses
+            coordinates = await geocodeLocations(addresses)
+
+            # Places
+            places = []
+
+            # Assign attributes to each place
+            for id, (name, address, coordinate) in enumerate(zip(names, addresses, coordinates)):
+                place = {
+                    "id": id,
+                    "name": name,
+                    "address": address,
+                    "coordinates": coordinate
+                }
+                places.append(place)
+
+            # Prepare response data
+            responseData = {
+                "itinerary": itineraryContent,
+                "places": places
+            }
+
+            print(responseData)
+            # Return formatted response
+            botResponse = {"response": responseData}
+            return JSONResponse(content=botResponse)
+
+        # Return raw response 
+        botResponse = {"response": response.content}
+        return JSONResponse(content=botResponse)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
 
 # Generates itinerary and fetches coordinates
 @app.post("/api/generateItinerary/")
