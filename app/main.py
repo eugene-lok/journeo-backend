@@ -36,6 +36,7 @@ systemPrompt = (
         f"- **Trip duration** (phrased as 'X days', 'X-day trip', 'a week', or 'from date A to date B').\n"
         f"- **Trip origin** (phrased as 'from X', 'starting in X', or 'origin is X').\n"
         f"- **Trip destination** (phrased as 'to X', 'destination is X', or 'visit X').\n"
+        f"- **Number of travellers** (phrased as 'for X people, 'with X people', or 'X people going').\n"
         f"- **Trip budget** (phrased as '$X', 'a budget of X', or 'around X').\n\n"
 
         f"### Duration Handling:\n"
@@ -47,11 +48,14 @@ systemPrompt = (
         f"### Destination Handling:\n"
         f"**If the user specifies the destination with phrases like 'to X', 'destination is X', or 'visit X', assume the destination is complete and do not ask for it again.**\n\n"
 
+        f"### Number of Travellers Handling:\n"
+        f"**If the user specifies the number of travellers with phrases like 'for X people, 'with X people', or 'X people going', assume the number of travellers is complete and do not ask for it again.**\n\n"
+
         f"### Budget Handling:\n"
         f"**If the user specifies the budget with phrases like '$X', 'a budget of X', or 'around X', assume the budget is complete and do not ask for it again.**\n\n"
 
         f"### Completion Handling:\n"
-        f"Once the user provides all four parameters (trip duration, origin, destination, and budget), you must generate the itinerary immediately without asking further questions or clarifying anything. "
+        f"Once the user provides all five parameters (trip duration, origin, destination, number of travellers, and budget), you must generate the itinerary immediately without asking further questions or clarifying anything. "
         f"Do not delay generating the itinerary once all the information has been gathered.\n\n"
 
         f"### Itinerary Format:\n"
@@ -59,7 +63,7 @@ systemPrompt = (
         f"2. Organize the itinerary by days. The first and last days are for travel:\n"
         f"   - First day: Travel from the origin to the destination.\n"
         f"   - Last day: Travel back from the destination to the origin.\n"
-        f"3. For each location you suggest, use the following mandatory format:\n"
+        f"3. For each location you suggest, use the following mandatory format. Recommend at least 2 locations per day unless the single location will take a full day to visit:\n"
         f"   - **Name:** [Always start with this]\n"
         f"   - **Address:** [This must be on a new line]\n"
         f"   - **Description:** [Provide a brief description]\n\n"
