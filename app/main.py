@@ -3,9 +3,15 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from app.models import UserItinerary, UserMessage
 from app.middleware import addCorsMiddleware
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, SystemMessagePromptTemplate, MessagesPlaceholder
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain.chat_models import ChatOpenAI
+from langchain.prompts import (
+    ChatPromptTemplate,
+    HumanMessagePromptTemplate,
+    SystemMessagePromptTemplate,
+    MessagesPlaceholder
+)
+from langchain.schema import AIMessage, HumanMessage, SystemMessage
+
 
 #from app.auth import authRouter
 import os
@@ -264,6 +270,6 @@ async def geocodeLocations(addresses: list[str]):
         results = await asyncio.gather(*tasks)
     return results
 
-# Get place types from 
+# Get place types from Google Places API 
 
 # Get GeoJSON routes from Mapbox Directions API
