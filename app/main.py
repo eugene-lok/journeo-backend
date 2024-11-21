@@ -59,7 +59,7 @@ systemPrompt = (
         f"2. Organize the itinerary by days. The first and last days are for travel:\n"
         f"   - First day: Travel from the origin to the destination.\n"
         f"   - Last day: Travel back from the destination to the origin.\n"
-        f"3. For each location you suggest, use the following mandatory format:\n"
+        f"3. For each location you suggest, use the following mandatory format. Recommend at least 2 locations per day unless the single location will take a full day to visit:\n"
         f"   - **Name:** [Always start with this]\n"
         f"   - **Address:** [This must be on a new line]\n"
         f"   - **Description:** [Provide a brief description]\n\n"
