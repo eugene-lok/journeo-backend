@@ -36,6 +36,7 @@ systemPrompt = (
         f"- **Trip duration** (phrased as 'X days', 'X-day trip', 'a week', or 'from date A to date B').\n"
         f"- **Trip origin** (phrased as 'from X', 'starting in X', or 'origin is X').\n"
         f"- **Trip destination** (phrased as 'to X', 'destination is X', or 'visit X').\n"
+        f"- **Number of travellers** (phrased as 'for X people, or for X').\n"
         f"- **Trip budget** (phrased as '$X', 'a budget of X', or 'around X').\n\n"
 
         f"### Duration Handling:\n"
