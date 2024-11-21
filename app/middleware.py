@@ -2,7 +2,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 def addCorsMiddleware(app):
     origins = [
-        "https://your-frontend.vercel.app",  
+        "https://https://journeo-frontend-zeta.vercel.app/",  
         "http://localhost:3000",             # Local 
     ]
     app.add_middleware(
