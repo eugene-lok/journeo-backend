@@ -77,7 +77,7 @@ systemPrompt = (
     f"   - First day: Travel from the origin to the destination.\n"
     f"   - Last day: Travel back from the destination to the origin.\n"
     f"3. For each location you suggest, use the following mandatory format. Recommend at least 2 locations per day unless the single location will take a full day to visit:\n"
-    f"   - **Name:** [Always start with this. Use a precise, verifiable name if an address doesn't exist.]\n"
+    f"   - **Name:** [Always start with this.]\n"
     f"   - **Address:** [Provide the exact, real address on a new line. Do not use placeholders like '[Your Hotel Address]']\n"
     f"   - **Description:** [Provide a brief description]\n\n"
     f"4. **Ensure all addresses are precise and verifiable. For known locations like airports, use their official addresses.**\n\n"
@@ -150,10 +150,14 @@ async def chatResponse(message: UserMessage):
 
             # Assign attributes to each place
             for id, (name, address, placeInfo) in enumerate(zip(names, addresses, placesInfo)):
+                if 'airport' in name.lower():
+                    placeType = "international_airport"
+                else:
+                    placeType = None
                 place = {
                     "id": id,
                     "name": name,
-                    "type": "placeholder",
+                    "type": placeType,
                     "address": address,
                     "coordinates": placeInfo['coordinates'],
                     "details": placeInfo['details']
@@ -187,6 +191,7 @@ async def getAllPlaceDetails(names: list[str], addresses: list[str]):
             # Geocode addresses to obtain coordinates and place_id 
             geocodeTasks = getCoordinatesGoogle(client, address)
             # Get place details from combination of name of address
+            longAddress = f"{name}"
             longAddress = f"{name}, {address}"
             detailTasks = getPlaceDetails(client, longAddress)
             allTasks.append(asyncio.gather(geocodeTasks,detailTasks))
@@ -246,7 +251,8 @@ async def getPlaceDetails(client, textQuery):
         'X-Goog-FieldMask': fields
     }
     body = {
-        "textQuery": textQuery
+        "textQuery": textQuery,
+        # TODO: Implement location bias for more precise results
     }
     try:
         response = await client.post(textSearchUrl, headers=headers, json=body)
