@@ -42,7 +42,7 @@ systemPrompt = (
     f"- **Trip duration** (phrased as 'X days', 'X-day trip', 'a week', or 'from date A to date B').\n"
     f"- **Trip origin** (phrased as 'from X', 'starting in X', or 'origin is X').\n"
     f"- **Trip destination** (phrased as 'to X', 'destination is X', or 'visit X').\n"
-    f"- **Number of travellers** (phrased as 'for X people, 'with X people', or 'X people going').\n"
+    f"- **Number of travellers** (phrased as 'for X people', 'with X people', 'X people going', 'alone', or 'solo').\n"
     f"- **Trip budget** (phrased as '$X', 'a budget of X', or 'around X').\n\n"
 
     f"### Duration Handling:\n"
@@ -55,7 +55,7 @@ systemPrompt = (
     f"**If the user specifies the destination with phrases like 'to X', 'destination is X', or 'visit X', assume the destination is complete and do not ask for it again.**\n\n"
 
     f"### Number of Travellers Handling:\n"
-    f"**If the user specifies the number of travellers with phrases like 'for X people, 'with X people', or 'X people going', assume the number of travellers is complete and do not ask for it again.**\n\n"
+    f"**If the user specifies the number of travellers with phrases like 'for X people', 'with X people', 'X people going', 'alone', or 'solo', assume the number of travellers is complete and do not ask for it again. Interpret 'alone' or 'solo' as 1 traveller.**\n\n"
 
     f"### Budget Handling:\n"
     f"**If the user specifies the budget with phrases like '$X', 'a budget of X', or 'around X', assume the budget is complete and do not ask for it again.**\n\n"
@@ -63,8 +63,9 @@ systemPrompt = (
     f"### Handling Changes:\n"
     f"- **If the user requests a change to their itinerary, do not reclarify all parameters unless explicitly asked to.**\n"
     f"- **First, ask the user: 'Would you like to keep the rest of the trip the same?'**\n"
-    f"- If the user wants to keep the rest of the trip the same, make only the requested change and regenerate the itinerary.\n"
-    f"- If the user wants to modify other aspects, clarify only the specific parameters they want to change and retain the rest of the inputs.\n\n"
+    f"  - **If the user responds affirmatively (e.g., 'Yes, keep the rest the same'), apply the requested change and regenerate the itinerary.**\n"
+    f"  - **If the user wants to modify other aspects, ask specifically which parameters they would like to change and retain the rest of the inputs.**\n"
+    f"- **Ensure that only the modified parameters are updated while others remain unchanged.**\n\n"
 
     f"### Completion Handling:\n"
     f"Once the user provides all five parameters (trip duration, origin, destination, number of travellers, and budget), you must generate the itinerary immediately without asking further questions or clarifying anything. "
@@ -77,13 +78,19 @@ systemPrompt = (
     f"   - Last day: Travel back from the destination to the origin.\n"
     f"3. For each location you suggest, use the following mandatory format. Recommend at least 2 locations per day unless the single location will take a full day to visit:\n"
     f"   - **Name:** [Always start with this]\n"
-    f"   - **Address:** [This must be on a new line]\n"
+    f"   - **Address:** [Provide the exact, real address on a new line. Do not use placeholders like '[Your Hotel Address]']\n"
     f"   - **Description:** [Provide a brief description]\n\n"
+    f"4. **Ensure all addresses are precise and verifiable. For known locations like airports, use their official addresses.**\n\n"
+
     f"After the itinerary, include a 'Budget Breakdown' section.\n\n"
+
     f"Under no circumstances should you:\n"
     f"- Ask for additional information or preferences after all inputs are received.\n"
-    f"- Delay generating the itinerary."
+    f"- Delay generating the itinerary.\n"
+    f"- Use placeholder text for addresses.\n"
+    f"- Provide vague or imprecise addresses.\n"
 )
+
 
 
 systemMessage = SystemMessagePromptTemplate.from_template(systemPrompt)
@@ -223,19 +230,19 @@ async def generateItinerary(userItinerary: UserItinerary):
     addressPattern = r"\*\*Address:\*\*\s(.*?)(?=\n)"
     addresses: list[str] = re.findall(addressPattern, itineraryContent)
 
-    # Get coordinates of addresses
-    coordinates = await geocodeLocations(addresses)
+    # Get coordinates and googlePlaceId of addresses
+    googlePlaceInfo = await geocodeLocations(addresses)
 
     # Places 
     places = []
 
     # Assign attributes to each place
-    for id, (name, address, coordinate) in enumerate(zip(names, addresses, coordinates)):
+    for id, (name, address, googlePlace) in enumerate(zip(names, addresses, googlePlaceInfo)):
         place = {
             "id": id,
             "name": name,
             "address": address,
-            "coordinates": coordinate
+            "coordinates": googlePlace
         }
 
         places.append(place)
@@ -266,10 +273,41 @@ async def getCoordinates(client, address):
 # Geocode list of addresses in parallel requests 
 async def geocodeLocations(addresses: list[str]):
     async with httpx.AsyncClient() as client:
-        tasks = [getCoordinates(client, address) for address in addresses]
+        tasks = [getCoordinatesGoogle(client, address) for address in addresses]
         results = await asyncio.gather(*tasks)
+        print(f"geocoding results:\n{results}")
     return results
 
+# Get lat, long, and place_id from Google Geocoding API
+async def getCoordinatesGoogle(client, address):
+    print(f"Address: {address}")
+    googleAPIKey = os.getenv("GOOGLE_API_KEY")
+    geocode_url = f"https://maps.googleapis.com/maps/api/geocode/json?address={address}&key={googleAPIKey}"
+    try:
+        response = await client.get(geocode_url)
+        if response.status_code == 200:
+            data = response.json()
+            if data["results"]:
+                location = data["results"][0]["geometry"]["location"]
+                placeId = data["results"][0]["place_id"]
+                #print(data["results"][0]["geometry"])
+                return {
+                    "latitude": location["lat"],
+                    "longitude": location["lng"],
+                    "placeId": placeId,
+                    "generatedAddress": address  
+                }
+            else:
+                print(f"No results found for address: {address}")
+                return None
+        else:
+            print(f"Error fetching coordinates for address {address}: {response.text}")
+            return None
+    except Exception as e:
+        print(f"Exception occurred while fetching coordinates for address {address}: {e}")
+        return None
+
 # Get place types from Google Places API 
+
 
 # Get GeoJSON routes from Mapbox Directions API
