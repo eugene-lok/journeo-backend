@@ -142,19 +142,25 @@ async def chatResponse(message: UserMessage):
             addressPattern = r"\*\*Address:\*\*\s(.*?)(?=\n)"
             addresses: list[str] = re.findall(addressPattern, itineraryContent)
 
-            # Get coordinates of addresses
-            coordinates = await geocodeLocations(addresses)
+            # Get coordinates and googlePlaceId of addresses
+            placesInfo = await geocodeLocations(addresses)
 
             # Places
             places = []
 
             # Assign attributes to each place
-            for id, (name, address, coordinate) in enumerate(zip(names, addresses, coordinates)):
+            for id, (name, address, placeInfo) in enumerate(zip(names, addresses, placesInfo)):
                 place = {
                     "id": id,
                     "name": name,
+                    "type": "placeholder",
                     "address": address,
-                    "coordinates": coordinate
+                    "googlePlaceId": placeInfo['placeId'],
+                    "coordinates": {
+                        'latitude': placeInfo['latitude'],
+                        'longitude': placeInfo['longitude'],
+                        'generatedAddress': placeInfo['generatedAddress']
+                    }
                 }
                 places.append(place)
 
@@ -175,9 +181,110 @@ async def chatResponse(message: UserMessage):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
+
+
+# Geocode list of addresses in parallel requests 
+async def geocodeLocations(addresses: list[str]):
+    async with httpx.AsyncClient() as client:
+        tasks = [getCoordinatesGoogle(client, address) for address in addresses]
+        results = await asyncio.gather(*tasks)
+        print(f"geocoding results:\n{results}")
+    return results
+
+# Get lat, long, and place_id from Google Geocoding API
+async def getCoordinatesGoogle(client, address):
+    print(f"Address: {address}")
+    googleAPIKey = os.getenv("GOOGLE_API_KEY")
+    geocodeUrl = f"https://maps.googleapis.com/maps/api/geocode/json?address={address}&key={googleAPIKey}"
+    try:
+        response = await client.get(geocodeUrl)
+        if response.status_code == 200:
+            data = response.json()
+            if data["results"]:
+                location = data["results"][0]["geometry"]["location"]
+                placeId = data["results"][0]["place_id"]
+                #print(data["results"][0]["geometry"])
+                return {
+                    "latitude": location["lat"],
+                    "longitude": location["lng"],
+                    "placeId": placeId,
+                    "generatedAddress": address  
+                }
+            else:
+                print(f"No results found for address: {address}")
+                return None
+        else:
+            print(f"Error fetching coordinates for address {address}: {response.text}")
+            return None
+    except Exception as e:
+        print(f"Exception occurred while fetching coordinates for address {address}: {e}")
+        return None
+
+# Get place type and details from Google Text Search API
+async def getPlaceDetails(client, textQuery):
+    apiKey = os.getenv("GOOGLE_API_KEY")
+    # Field mask
+    fields = "places.id,places.displayName,places.formattedAddress,places.primaryType,places.googleMapsUri,places.websiteUri,places.rating,places.photos"
+    # Construct request params and body
+    textSearchUrl = "https://places.googleapis.com/v1/places:searchText"
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': apiKey,
+        'X-Goog-FieldMask': fields
+    }
+    body = {
+        "textQuery": textQuery
+    }
+    try:
+        response = await client.post(textSearchUrl, headers=headers, json=body)
+        if response.status_code == 200:
+            data = response.json()
+            #print(data)
+            if 'places' in data:
+                places = data['places']
+                results = []
+                # Map data
+                for place in places:
+                    results.append({
+                        "googlePlaceId": place["id"],
+                        "displayName": place["displayName"],
+                        "formattedAddress": place["formattedAddress"],
+                        "primaryType": place["primaryType"],
+                        "googleMapsUri": place["googleMapsUri"],
+                        "websiteUri": place["websiteUri"],
+                        "rating": place["rating"],
+                        #"photos": places['photos']
+                    })
+                print(f"results: {results}")
+                return results
+            else:
+                print(f"No places found for query: {textQuery}")
+                return None
+        else:
+            print(f"Error fetching places for query '{textQuery}': {response.text}")
+            return None
+    except Exception as e:
+        print(f"Exception occurred while fetching places for query '{textQuery}': {e}")
+        return None
+
+# Get GeoJSON routes from Mapbox Directions API
+
+# Get lat, long from Mapbox Geocoding API 
+""" async def getCoordinates(client, address):
+    print(f"Address: {address}")
+    accessToken = os.getenv("MAPBOX_ACCESS_TOKEN")
+    geocodeUrl = f"https://api.mapbox.com/search/geocode/v6/forward?q={address}&access_token={accessToken}"
+    response = await client.get(geocodeUrl)
+    if response.status_code == 200:
+        data = response.json()
+        if data["features"]:
+            coords = data["features"][0]["geometry"]["coordinates"]
+            return {"latitude": coords[1], "longitude": coords[0]}
+        return None """
+
 
 # Generates itinerary and fetches coordinates
+"""
 @app.post("/api/generateItinerary/")
 async def generateItinerary(userItinerary: UserItinerary):
     # Prepare the prompt for the OpenAI API
@@ -240,6 +347,7 @@ async def generateItinerary(userItinerary: UserItinerary):
     for id, (name, address, googlePlace) in enumerate(zip(names, addresses, googlePlaceInfo)):
         place = {
             "id": id,
+            "type": "placeholder",
             "name": name,
             "address": address,
             "coordinates": googlePlace
@@ -255,59 +363,34 @@ async def generateItinerary(userItinerary: UserItinerary):
 
     print(response_data)
     # Return formatted response
-    return response_data
+    return response_data """
 
-# Get lat, long from Mapbox Geocoding API 
-async def getCoordinates(client, address):
-    print(f"Address: {address}")
-    accessToken = os.getenv("MAPBOX_ACCESS_TOKEN")
-    geocodeUrl = f"https://api.mapbox.com/search/geocode/v6/forward?q={address}&access_token={accessToken}"
-    response = await client.get(geocodeUrl)
-    if response.status_code == 200:
-        data = response.json()
-        if data["features"]:
-            coords = data["features"][0]["geometry"]["coordinates"]
-            return {"latitude": coords[1], "longitude": coords[0]}
-        return None
-
-# Geocode list of addresses in parallel requests 
-async def geocodeLocations(addresses: list[str]):
-    async with httpx.AsyncClient() as client:
-        tasks = [getCoordinatesGoogle(client, address) for address in addresses]
-        results = await asyncio.gather(*tasks)
-        print(f"geocoding results:\n{results}")
-    return results
-
-# Get lat, long, and place_id from Google Geocoding API
-async def getCoordinatesGoogle(client, address):
-    print(f"Address: {address}")
-    googleAPIKey = os.getenv("GOOGLE_API_KEY")
-    geocode_url = f"https://maps.googleapis.com/maps/api/geocode/json?address={address}&key={googleAPIKey}"
+# Get place details from Google Place Details API
+""" async def getPlaceDetails(client, place_id):
+    api_key = os.getenv("GOOGLE_API_KEY")
+    fields = "place_id,name,types,rating,website,url,photos"
+    place_details_url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={place_id}&fields={fields}&key={api_key}"
     try:
-        response = await client.get(geocode_url)
+        response = await client.get(place_details_url)
         if response.status_code == 200:
             data = response.json()
-            if data["results"]:
-                location = data["results"][0]["geometry"]["location"]
-                placeId = data["results"][0]["place_id"]
-                #print(data["results"][0]["geometry"])
+            if "result" in data:
+                result = data["result"]
                 return {
-                    "latitude": location["lat"],
-                    "longitude": location["lng"],
-                    "placeId": placeId,
-                    "generatedAddress": address  
+                    "id": result.get("place_id"),
+                    "displayName": result.get("name"),
+                    "types": result.get("types"),
+                    "rating": result.get("rating"),
+                    "websiteUri": result.get("website"),
+                    "googleMapsUri": result.get("url"),
+                    "photos": result.get("photos")  
                 }
             else:
-                print(f"No results found for address: {address}")
+                print(f"No result found for placeId: {place_id}")
                 return None
         else:
-            print(f"Error fetching coordinates for address {address}: {response.text}")
+            print(f"Error fetching place details for placeId {place_id}: {response.text}")
             return None
     except Exception as e:
-        print(f"Exception occurred while fetching coordinates for address {address}: {e}")
-        return None
-
-# Get place types from Google Places API 
-
-
-# Get GeoJSON routes from Mapbox Directions API
+        print(f"Exception occurred while fetching place details for placeId: {place_id}: {e}")
+        return None """
