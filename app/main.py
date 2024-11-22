@@ -77,7 +77,7 @@ systemPrompt = (
     f"   - First day: Travel from the origin to the destination.\n"
     f"   - Last day: Travel back from the destination to the origin.\n"
     f"3. For each location you suggest, use the following mandatory format. Recommend at least 2 locations per day unless the single location will take a full day to visit:\n"
-    f"   - **Name:** [Always start with this]\n"
+    f"   - **Name:** [Always start with this. Use a precise, verifiable name if an address doesn't exist.]\n"
     f"   - **Address:** [Provide the exact, real address on a new line. Do not use placeholders like '[Your Hotel Address]']\n"
     f"   - **Description:** [Provide a brief description]\n\n"
     f"4. **Ensure all addresses are precise and verifiable. For known locations like airports, use their official addresses.**\n\n"
@@ -143,7 +143,7 @@ async def chatResponse(message: UserMessage):
             addresses: list[str] = re.findall(addressPattern, itineraryContent)
 
             # Get coordinates and googlePlaceId of addresses
-            placesInfo = await geocodeLocations(addresses)
+            placesInfo = await getAllPlaceDetails(names, addresses)
 
             # Places
             places = []
@@ -155,12 +155,8 @@ async def chatResponse(message: UserMessage):
                     "name": name,
                     "type": "placeholder",
                     "address": address,
-                    "googlePlaceId": placeInfo['placeId'],
-                    "coordinates": {
-                        'latitude': placeInfo['latitude'],
-                        'longitude': placeInfo['longitude'],
-                        'generatedAddress': placeInfo['generatedAddress']
-                    }
+                    "coordinates": placeInfo['coordinates'],
+                    "details": placeInfo['details']
                 }
                 places.append(place)
 
@@ -183,11 +179,28 @@ async def chatResponse(message: UserMessage):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Geocode list of addresses in parallel requests 
-async def geocodeLocations(addresses: list[str]):
+# Geocode list of addresses in parallel requests and fetches place details in parallel
+async def getAllPlaceDetails(names: list[str], addresses: list[str]):
     async with httpx.AsyncClient() as client:
-        tasks = [getCoordinatesGoogle(client, address) for address in addresses]
-        results = await asyncio.gather(*tasks)
+        allTasks = []
+        for name, address in zip(names, addresses):
+            # Geocode addresses to obtain coordinates and place_id 
+            geocodeTasks = getCoordinatesGoogle(client, address)
+            # Get place details from combination of name of address
+            longAddress = f"{name}, {address}"
+            detailTasks = getPlaceDetails(client, longAddress)
+            allTasks.append(asyncio.gather(geocodeTasks,detailTasks))
+
+        # Gather all tasks
+        allResults = await asyncio.gather(*allTasks)
+        results = []
+        for geocodeResult, detailResult in allResults:
+            result = {
+                "coordinates": geocodeResult,
+                "details": detailResult
+            }
+            results.append(result)
+
         print(f"geocoding results:\n{results}")
     return results
 
