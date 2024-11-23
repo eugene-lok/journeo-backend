@@ -159,9 +159,10 @@ async def chatResponse(message: UserMessage):
                     "name": name,
                     "type": placeType,
                     "address": address,
-                    "initialPlaceId": placeInfo["initialPlaceId"],
+                    "initialPlaceId": placeInfo['initialPlaceId'],
                     "coordinates": placeInfo['coordinates'],
-                    "details": placeInfo['placePrediction']
+                    "predictedLocation": placeInfo['placePrediction'],
+                    "details": placeInfo['details']
                 }
                 places.append(place)
 
@@ -187,11 +188,12 @@ async def chatResponse(message: UserMessage):
 # Geocode list of addresses in parallel requests and fetches place details in parallel
 async def getAllPlaceDetails(names: list[str], addresses: list[str]):
     async with httpx.AsyncClient() as client:
-        coordinates = []
         geocodeTasks = []
         autoCompleteTasks = []
+        detailsTasks = []
+
+        # Geocode addresses to obtain coordinates and placeId 
         for name, address in zip(names, addresses):
-            # Geocode addresses to obtain coordinates and placeId 
             geocodeTask = getCoordinatesGoogle(client, address)
             geocodeTasks.append(geocodeTask)
             # Get place details from combination of name of address
@@ -202,22 +204,32 @@ async def getAllPlaceDetails(names: list[str], addresses: list[str]):
             #allTasks.append(asyncio.gather(geocodeTasks,detailTasks))
             #allTasks.append(asyncio.gather(geocodeTasks, autoCompleteTasks))
         geocodeResults = await asyncio.gather(*geocodeTasks)
+        # Obtain coordinates from geocoded addresses
+        coordinates = []
         coordinates = [geocodeResult['coordinates'] for geocodeResult in geocodeResults]
         
+        # Use name and coordinates to fetch precise placeId
         for name, coordinate in zip(names, coordinates):
-            # Use name and coordinates to fetch precise placeId
             autoCompleteTask = getPlaceFromAutocomplete(client, name, coordinate)
             autoCompleteTasks.append(autoCompleteTask)
         autoCompleteResults = await asyncio.gather(*autoCompleteTasks)
+        # Obtain new place Ids from queried locations
+        precisePlaceIds = []
+        precisePlaceIds = [autoCompleteResult['precisePlaceId'] for autoCompleteResult in autoCompleteResults]
 
+        for precisePlaceId in precisePlaceIds:
+            detailsTask = getPlaceDetailsFromId(client, precisePlaceId)
+            detailsTasks.append(detailsTask)
+        detailsResults = await asyncio.gather(*detailsTasks)
         # 
         #allResults = await asyncio.gather(*allTasks)
         results = []
-        for geocodeResult, autoCompleteResult in zip(geocodeResults, autoCompleteResults):
+        for geocodeResult, autoCompleteResult, detailsResult in zip(geocodeResults, autoCompleteResults, detailsResults):
             result = {
                 "initialPlaceId": geocodeResult['placeId'],
                 "coordinates": geocodeResult['coordinates'],
-                "placePrediction": autoCompleteResult
+                "placePrediction": autoCompleteResult,
+                "details": detailsResult
             }
             results.append(result)
 
@@ -268,7 +280,7 @@ async def getPlaceFromAutocomplete(client, input, coordinates):
     """ body = {
         "input": input,
     }
- """# Restrict 2km within coordinates
+ """# Restrict 2.5km within coordinates
     body = {
         "input": input,
         "locationRestriction": {
@@ -277,7 +289,7 @@ async def getPlaceFromAutocomplete(client, input, coordinates):
                     "latitude": coordinates['latitude'],
                     "longitude": coordinates['longitude']
                 },
-            "radius": 2000.0
+            "radius": 2500.0
             }
         }
     }
@@ -303,17 +315,45 @@ async def getPlaceFromAutocomplete(client, input, coordinates):
         print(f"Exception occurred while fetching places for query '{input}': {e}")
         return None
     
+# Get place details from Google Place Details API using Place ID
+async def getPlaceDetailsFromId(client, placeId):
+    googleAPIKey = os.getenv("GOOGLE_API_KEY")
+    fields = "place_id,name,types,rating,website,url,photos"
+    place_details_url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={placeId}&fields={fields}&key={googleAPIKey}"
+    try:
+        response = await client.get(place_details_url)
+        if response.status_code == 200:
+            data = response.json()
+            if "result" in data:
+                result = data["result"]
+                return {
+                    "id": result.get("place_id"),
+                    "displayName": result.get("name"),
+                    "types": result.get("types"),
+                    "rating": result.get("rating"),
+                    "websiteUri": result.get("website"),
+                    "googleMapsUri": result.get("url"),
+                }
+            else:
+                print(f"No result found for placeId: {placeId}")
+                return None
+        else:
+            print(f"Error fetching place details for placeId {placeId}: {response.text}")
+            return None
+    except Exception as e:
+        print(f"Exception occurred while fetching place details for placeId: {placeId}: {e}")
+        return None
 
 # Get place type and details from Google Text Search API
-async def getPlaceDetails(client, textQuery):
-    apiKey = os.getenv("GOOGLE_API_KEY")
+async def getPlaceDetailsFromText(client, textQuery):
+    googleAPIKey = os.getenv("GOOGLE_API_KEY")
     # Field mask
     fields = "places.id,places.displayName,places.formattedAddress,places.primaryType,places.googleMapsUri,places.websiteUri,places.rating,places.photos"
     # Construct request params and body
     textSearchUrl = "https://places.googleapis.com/v1/places:searchText"
     headers = {
         'Content-Type': 'application/json',
-        'X-Goog-Api-Key': apiKey,
+        'X-Goog-Api-Key': googleAPIKey,
         'X-Goog-FieldMask': fields
     }
     body = {
@@ -449,32 +489,3 @@ async def generateItinerary(userItinerary: UserItinerary):
     # Return formatted response
     return response_data """
 
-# Get place details from Google Place Details API
-""" async def getPlaceDetails(client, place_id):
-    api_key = os.getenv("GOOGLE_API_KEY")
-    fields = "place_id,name,types,rating,website,url,photos"
-    place_details_url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={place_id}&fields={fields}&key={api_key}"
-    try:
-        response = await client.get(place_details_url)
-        if response.status_code == 200:
-            data = response.json()
-            if "result" in data:
-                result = data["result"]
-                return {
-                    "id": result.get("place_id"),
-                    "displayName": result.get("name"),
-                    "types": result.get("types"),
-                    "rating": result.get("rating"),
-                    "websiteUri": result.get("website"),
-                    "googleMapsUri": result.get("url"),
-                    "photos": result.get("photos")  
-                }
-            else:
-                print(f"No result found for placeId: {place_id}")
-                return None
-        else:
-            print(f"Error fetching place details for placeId {place_id}: {response.text}")
-            return None
-    except Exception as e:
-        print(f"Exception occurred while fetching place details for placeId: {place_id}: {e}")
-        return None """
