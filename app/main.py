@@ -160,7 +160,7 @@ async def chatResponse(message: UserMessage):
                     "type": placeType,
                     "address": address,
                     "coordinates": placeInfo['coordinates'],
-                    "details": placeInfo['details']
+                    "details": placeInfo['placePrediction']
                 }
                 places.append(place)
 
@@ -186,25 +186,36 @@ async def chatResponse(message: UserMessage):
 # Geocode list of addresses in parallel requests and fetches place details in parallel
 async def getAllPlaceDetails(names: list[str], addresses: list[str]):
     async with httpx.AsyncClient() as client:
-        allTasks = []
+        coordinates = []
+        geocodeTasks = []
+        autoCompleteTasks = []
         for name, address in zip(names, addresses):
-            # Geocode addresses to obtain coordinates and place_id 
-            geocodeTasks = getCoordinatesGoogle(client, address)
+            # Geocode addresses to obtain coordinates and placeId 
+            geocodeTask = getCoordinatesGoogle(client, address)
+            geocodeTasks.append(geocodeTask)
             # Get place details from combination of name of address
-            longAddress = f"{name}"
+            #longAddress = f"{name}"
             # longAddress = f"{name}, {address}"
             #detailTasks = getPlaceDetails(client, longAddress)
-            autoCompleteTasks = getPlaceFromAutocomplete(client, longAddress)
+            #autoCompleteTasks = getPlaceFromAutocomplete(client, longAddress)
             #allTasks.append(asyncio.gather(geocodeTasks,detailTasks))
-            allTasks.append(asyncio.gather(geocodeTasks, autoCompleteTasks))
+            #allTasks.append(asyncio.gather(geocodeTasks, autoCompleteTasks))
+        geocodeResults = await asyncio.gather(*geocodeTasks)
+        coordinates = [geocodeResult['coordinates'] for geocodeResult in geocodeResults]
+        
+        for name, coordinate in zip(names, coordinates):
+            # Use name and coordinates to fetch precise placeId
+            autoCompleteTask = getPlaceFromAutocomplete(client, name, coordinate)
+            autoCompleteTasks.append(autoCompleteTask)
+        autoCompleteResults = await asyncio.gather(*autoCompleteTasks)
 
-        # Gather all tasks
-        allResults = await asyncio.gather(*allTasks)
+        # 
+        #allResults = await asyncio.gather(*allTasks)
         results = []
-        for geocodeResult, autoCompleteResult in allResults:
+        for geocodeResult, autoCompleteResult in zip(geocodeResults, autoCompleteResults):
             result = {
-                "coordinates": geocodeResult,
-                "details": autoCompleteResult
+                "coordinates": geocodeResult['coordinates'],
+                "placePrediction": autoCompleteResult
             }
             results.append(result)
 
@@ -225,8 +236,10 @@ async def getCoordinatesGoogle(client, address):
                 placeId = data["results"][0]["place_id"]
                 #print(data["results"][0]["geometry"])
                 return {
-                    "latitude": location["lat"],
-                    "longitude": location["lng"],
+                    "coordinates": {
+                        "latitude": location["lat"],
+                        "longitude": location["lng"]
+                    },
                     "placeId": placeId,
                     "generatedAddress": address  
                 }
@@ -241,7 +254,8 @@ async def getCoordinatesGoogle(client, address):
         return None
 
 # Get precise place ID from Google Autocomplete API 
-async def getPlaceFromAutocomplete(client, input):
+async def getPlaceFromAutocomplete(client, input, coordinates):
+    print(f"\nname\n:{input}")
     apiKey = os.getenv("GOOGLE_API_KEY")
     autocompleteUrl = "https://places.googleapis.com/v1/places:autocomplete"
     headers = {
@@ -249,8 +263,22 @@ async def getPlaceFromAutocomplete(client, input):
         'X-Goog-Api-Key': apiKey,
         'X-Goog-FieldMask': "*"
     }
+    
+    """ body = {
+        "input": input,
+    }
+ """# Restrict 500m within coordinates
     body = {
-        "input": input
+        "input": input,
+        "locationRestriction": {
+            "circle": {
+                "center": {
+                    "latitude": coordinates['latitude'],
+                    "longitude": coordinates['longitude']
+                },
+            "radius": 500.0
+            }
+        }
     }
 
     try:
@@ -289,7 +317,6 @@ async def getPlaceDetails(client, textQuery):
     }
     body = {
         "textQuery": textQuery,
-        # TODO: Implement location bias for more precise results
     }
     try:
         response = await client.post(textSearchUrl, headers=headers, json=body)
