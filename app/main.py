@@ -159,6 +159,7 @@ async def chatResponse(message: UserMessage):
                     "name": name,
                     "type": placeType,
                     "address": address,
+                    "initialPlaceId": placeInfo["initialPlaceId"],
                     "coordinates": placeInfo['coordinates'],
                     "details": placeInfo['placePrediction']
                 }
@@ -214,6 +215,7 @@ async def getAllPlaceDetails(names: list[str], addresses: list[str]):
         results = []
         for geocodeResult, autoCompleteResult in zip(geocodeResults, autoCompleteResults):
             result = {
+                "initialPlaceId": geocodeResult['placeId'],
                 "coordinates": geocodeResult['coordinates'],
                 "placePrediction": autoCompleteResult
             }
@@ -241,7 +243,6 @@ async def getCoordinatesGoogle(client, address):
                         "longitude": location["lng"]
                     },
                     "placeId": placeId,
-                    "generatedAddress": address  
                 }
             else:
                 print(f"No results found for address: {address}")
@@ -267,7 +268,7 @@ async def getPlaceFromAutocomplete(client, input, coordinates):
     """ body = {
         "input": input,
     }
- """# Restrict 500m within coordinates
+ """# Restrict 2km within coordinates
     body = {
         "input": input,
         "locationRestriction": {
@@ -276,7 +277,7 @@ async def getPlaceFromAutocomplete(client, input, coordinates):
                     "latitude": coordinates['latitude'],
                     "longitude": coordinates['longitude']
                 },
-            "radius": 500.0
+            "radius": 2000.0
             }
         }
     }
