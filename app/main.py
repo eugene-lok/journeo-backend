@@ -192,17 +192,19 @@ async def getAllPlaceDetails(names: list[str], addresses: list[str]):
             geocodeTasks = getCoordinatesGoogle(client, address)
             # Get place details from combination of name of address
             longAddress = f"{name}"
-            longAddress = f"{name}, {address}"
-            detailTasks = getPlaceDetails(client, longAddress)
-            allTasks.append(asyncio.gather(geocodeTasks,detailTasks))
+            # longAddress = f"{name}, {address}"
+            #detailTasks = getPlaceDetails(client, longAddress)
+            autoCompleteTasks = getPlaceFromAutocomplete(client, longAddress)
+            #allTasks.append(asyncio.gather(geocodeTasks,detailTasks))
+            allTasks.append(asyncio.gather(geocodeTasks, autoCompleteTasks))
 
         # Gather all tasks
         allResults = await asyncio.gather(*allTasks)
         results = []
-        for geocodeResult, detailResult in allResults:
+        for geocodeResult, autoCompleteResult in allResults:
             result = {
                 "coordinates": geocodeResult,
-                "details": detailResult
+                "details": autoCompleteResult
             }
             results.append(result)
 
@@ -237,6 +239,41 @@ async def getCoordinatesGoogle(client, address):
     except Exception as e:
         print(f"Exception occurred while fetching coordinates for address {address}: {e}")
         return None
+
+# Get precise place ID from Google Autocomplete API 
+async def getPlaceFromAutocomplete(client, input):
+    apiKey = os.getenv("GOOGLE_API_KEY")
+    autocompleteUrl = "https://places.googleapis.com/v1/places:autocomplete"
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': apiKey,
+        'X-Goog-FieldMask': "*"
+    }
+    body = {
+        "input": input
+    }
+
+    try:
+        response = await client.post(autocompleteUrl, headers=headers, json=body)
+        if response.status_code == 200:
+            data = response.json()
+            # Get long name and placeId from prediction
+            if data["suggestions"]:
+                prediction = data["suggestions"][0]["placePrediction"]
+                return {
+                    "precisePlaceId": prediction["placeId"],
+                    "text": prediction['text']['text']
+                }
+            else:
+                print(f"No results found for query: {input}")
+                return None
+        else:
+            print(f"Error fetching results for query {input}: {response.text}")
+            return None
+    except Exception as e:
+        print(f"Exception occurred while fetching places for query '{input}': {e}")
+        return None
+    
 
 # Get place type and details from Google Text Search API
 async def getPlaceDetails(client, textQuery):
