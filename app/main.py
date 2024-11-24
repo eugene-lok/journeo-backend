@@ -151,20 +151,17 @@ async def chatResponse(message: UserMessage):
             # Assign attributes to each place
             for id, (name, address, placeInfo) in enumerate(zip(names, addresses, placesInfo)):
                 ## TODO: Implement logic to parse for airport in type and primaryType
-                if 'airport' in name.lower():
-                    placeType = "yes"
-                else:
-                    placeType = "no"
                 place = {
                     "id": id,
                     "name": name,
-                    "isAirport": placeType,
+                    "isAirport": None,
                     "address": address,
                     "initialPlaceId": placeInfo['initialPlaceId'],
                     "coordinates": placeInfo['coordinates'],
                     "predictedLocation": placeInfo['placePrediction'],
                     "details": placeInfo['details']
                 }
+                checkIfAirport(place)
                 places.append(place)
 
             # Prepare response data
@@ -316,7 +313,6 @@ async def getPlaceFromAutocomplete(client, input, coordinates):
         return None
     
 # Get place details from Google Place Details API using Place ID
-## TODO: Migrate to new details API and use new fields
 async def getPlaceDetailsFromId(client, placeId):
     googleAPIKey = os.getenv("GOOGLE_API_KEY")
     fields = "id,displayName,primaryType,primaryTypeDisplayName,types,websiteUri,googleMapsUri,internationalPhoneNumber,nationalPhoneNumber,containingPlaces,viewport"
@@ -401,6 +397,21 @@ async def getPlaceDetailsFromText(client, textQuery):
     except Exception as e:
         print(f"Exception occurred while fetching places for query '{textQuery}': {e}")
         return None
+
+# Assigns isAirport attribute of place
+def checkIfAirport(place):
+    placeDetails = place["details"]
+    if placeDetails is not None:
+        primaryType = placeDetails.get("primaryType")
+        types = placeDetails.get("types", [])
+        if primaryType == "international_airport" or "international_airport" in types or "airport" in types:
+            place["isAirport"] = True
+        else:
+            place["isAirport"] = False
+    else:
+        place["isAirport"] = False
+
+
 
 # Get GeoJSON routes from Mapbox Directions API
 
