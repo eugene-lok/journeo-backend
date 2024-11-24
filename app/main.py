@@ -150,14 +150,15 @@ async def chatResponse(message: UserMessage):
 
             # Assign attributes to each place
             for id, (name, address, placeInfo) in enumerate(zip(names, addresses, placesInfo)):
+                ## TODO: Implement logic to parse for airport in type and primaryType
                 if 'airport' in name.lower():
-                    placeType = "international_airport"
+                    placeType = "yes"
                 else:
-                    placeType = None
+                    placeType = "no"
                 place = {
                     "id": id,
                     "name": name,
-                    "type": placeType,
+                    "isAirport": placeType,
                     "address": address,
                     "initialPlaceId": placeInfo['initialPlaceId'],
                     "coordinates": placeInfo['coordinates'],
@@ -268,7 +269,6 @@ async def getCoordinatesGoogle(client, address):
 
 # Get precise place ID from Google Autocomplete API 
 async def getPlaceFromAutocomplete(client, input, coordinates):
-    print(f"\nname\n:{input}")
     apiKey = os.getenv("GOOGLE_API_KEY")
     autocompleteUrl = "https://places.googleapis.com/v1/places:autocomplete"
     headers = {
@@ -316,23 +316,34 @@ async def getPlaceFromAutocomplete(client, input, coordinates):
         return None
     
 # Get place details from Google Place Details API using Place ID
+## TODO: Migrate to new details API and use new fields
 async def getPlaceDetailsFromId(client, placeId):
     googleAPIKey = os.getenv("GOOGLE_API_KEY")
-    fields = "place_id,name,types,rating,website,url,photos"
-    place_details_url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={placeId}&fields={fields}&key={googleAPIKey}"
+    fields = "id,displayName,primaryType,primaryTypeDisplayName,types,websiteUri,googleMapsUri,internationalPhoneNumber,nationalPhoneNumber,containingPlaces,viewport"
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': googleAPIKey,
+        'X-Goog-FieldMask': fields
+    }
+    placeDetailsUrl = f"https://places.googleapis.com/v1/places/{placeId}"
     try:
-        response = await client.get(place_details_url)
+        response = await client.get(placeDetailsUrl, headers=headers)
         if response.status_code == 200:
-            data = response.json()
-            if "result" in data:
-                result = data["result"]
+            result = response.json()
+            print(f"RESPONSE:{result}")
+            if result is not None:
+                ## TODO: Use new fields 
                 return {
-                    "id": result.get("place_id"),
-                    "displayName": result.get("name"),
-                    "types": result.get("types"),
-                    "rating": result.get("rating"),
-                    "websiteUri": result.get("website"),
-                    "googleMapsUri": result.get("url"),
+                    "id": result["id"],
+                    "displayName": result["displayName"],
+                    "primaryType": result["primaryType"],
+                    "primaryTypeDisplayName": result["primaryTypeDisplayName"],
+                    "types": result["types"],
+                    "websiteUri": result["websiteUri"],
+                    "googleMapsUri": result["googleMapsUri"],
+                    "internationalPhoneNumber": result["internationalPhoneNumber"],
+                    "nationalPhoneNumber": result["nationalPhoneNumber"],
+                    "viewport": result["viewport"]
                 }
             else:
                 print(f"No result found for placeId: {placeId}")
