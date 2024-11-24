@@ -11,7 +11,7 @@ from langchain.prompts import (
     MessagesPlaceholder
 )
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
-
+from app.mapboxRoutes import getRouteFromMapbox
 
 #from app.auth import authRouter
 import os
@@ -150,7 +150,6 @@ async def chatResponse(message: UserMessage):
 
             # Assign attributes to each place
             for id, (name, address, placeInfo) in enumerate(zip(names, addresses, placesInfo)):
-                ## TODO: Implement logic to parse for airport in type and primaryType
                 place = {
                     "id": id,
                     "name": name,
@@ -170,7 +169,70 @@ async def chatResponse(message: UserMessage):
                 "places": places
             }
 
-            print(responseData)
+            routes = []
+
+            if len(places) >= 2:
+                # List of consecutive place pairs
+                consecutivePairs = []
+                for i in range(len(places) - 1):
+                    fromPlace = places[i]
+                    toPlace = places[i + 1]
+                    consecutivePairs.append((fromPlace, toPlace))
+
+                # Filter out pairs where both are airports
+                nonAirportPairs = []
+                for fromPlace, toPlace in consecutivePairs:
+                    if not (fromPlace.get("isAirport", False) and toPlace.get("isAirport", False)):
+                        nonAirportPairs.append((fromPlace, toPlace))
+
+                # Create route fetching tasks and keep track of pairs
+                routeTasks = []
+                routePairs = []
+
+                async with httpx.AsyncClient() as client:
+                    for fromPlace, toPlace in nonAirportPairs:
+                        task = getRouteFromMapbox(
+                            client,
+                            startCoords=fromPlace["coordinates"],
+                            endCoords=toPlace["coordinates"]
+                        )
+                        routeTasks.append(task)
+                        routePairs.append((fromPlace, toPlace))
+
+                    # Gather all route tasks
+                    route_results = await asyncio.gather(*routeTasks, return_exceptions=True)
+
+                # Add route pairs and routes
+                for index, result in enumerate(route_results):
+                    fromPlace, toPlace = routePairs[index]
+
+                    # Check for exception
+                    if isinstance(result, Exception):
+                        print(f"Failed to fetch route between {fromPlace['name']} and {toPlace['name']}: {result}")
+                        continue 
+                    
+                    # Append routes to list
+                    if result:
+                        routes.append({
+                            "from": {
+                                "id": fromPlace["id"],
+                                "name": fromPlace["name"],
+                                "coordinates": fromPlace["coordinates"]
+                            },
+                            "to": {
+                                "id": toPlace["id"],
+                                "name": toPlace["name"],
+                                "coordinates": toPlace["coordinates"]
+                            },
+                            "route": result 
+                        })
+                    else:
+                        print(f"No route found between {fromPlace['name']} and {toPlace['name']}.")
+
+            # Add routes to response 
+            responseData["routes"] = routes
+
+            #print(responseData)
             # Return formatted response
             botResponse = {"response": responseData}
             return JSONResponse(content=botResponse)
