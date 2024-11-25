@@ -12,13 +12,12 @@ from langchain.prompts import (
 )
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
 from app.mapboxRoutes import getRouteFromMapbox
-
+from app.loggerConfig import logger
 #from app.auth import authRouter
 import os
 import re
 import httpx
 import asyncio
-import logging
 
 # Configure logging
 #logging.basicConfig(level=logging.INFO)
@@ -35,11 +34,15 @@ addCorsMiddleware(app)
 llm = ChatOpenAI(
     model="gpt-4o-mini",
     temperature=0.7,
-    max_tokens=2000,
+    max_tokens=1500,
     timeout=None,
     max_retries=2,
     api_key=os.getenv("OPENAI_API_KEY")
 )
+
+
+## Put in options for adults and kids
+## Implement different budget options, don't have to ask for budget
 
 systemPrompt = (
     f"You are a travel agent. Your job is to generate a complete itinerary based on the user’s input. "
@@ -258,19 +261,11 @@ async def getAllPlaceDetails(names: list[str], addresses: list[str]):
         detailsTasks = []
 
         # Geocode addresses to obtain coordinates and placeId 
-        for name, address in zip(names, addresses):
+        for address in addresses:
             geocodeTask = getCoordinatesGoogle(client, address)
             geocodeTasks.append(geocodeTask)
-            # Get place details from combination of name of address
-            #longAddress = f"{name}"
-            # longAddress = f"{name}, {address}"
-            #detailTasks = getPlaceDetails(client, longAddress)
-            #autoCompleteTasks = getPlaceFromAutocomplete(client, longAddress)
-            #allTasks.append(asyncio.gather(geocodeTasks,detailTasks))
-            #allTasks.append(asyncio.gather(geocodeTasks, autoCompleteTasks))
         geocodeResults = await asyncio.gather(*geocodeTasks)
         # Obtain coordinates from geocoded addresses
-        coordinates = []
         coordinates = [geocodeResult['coordinates'] for geocodeResult in geocodeResults]
         
         # Use name and coordinates to fetch precise placeId
@@ -278,16 +273,32 @@ async def getAllPlaceDetails(names: list[str], addresses: list[str]):
             autoCompleteTask = getPlaceFromAutocomplete(client, name, coordinate)
             autoCompleteTasks.append(autoCompleteTask)
         autoCompleteResults = await asyncio.gather(*autoCompleteTasks)
-        # Obtain new place Ids from queried locations
-        precisePlaceIds = []
-        precisePlaceIds = [autoCompleteResult['precisePlaceId'] for autoCompleteResult in autoCompleteResults]
 
+        # Obtain new place IDs from queried locations
+        precisePlaceIds = []
+        for autoCompleteResult in autoCompleteResults:
+            if autoCompleteResult is not None:
+                precisePlaceIds.append(autoCompleteResult['precisePlaceId'])
+            else:
+                precisePlaceIds.append(None)
+
+        # Fetch place details using precisePlaceIds
         for precisePlaceId in precisePlaceIds:
-            detailsTask = getPlaceDetailsFromId(client, precisePlaceId)
-            detailsTasks.append(detailsTask)
-        detailsResults = await asyncio.gather(*detailsTasks)
-        # 
-        #allResults = await asyncio.gather(*allTasks)
+            if precisePlaceId is not None:
+                detailsTask = getPlaceDetailsFromId(client, precisePlaceId)
+                detailsTasks.append(detailsTask)
+            else:
+                detailsTasks.append(None)
+        # Await all details tasks
+        detailsResults = []
+        for detailsTask in detailsTasks:
+            if detailsTask is not None:
+                detailsResult = await detailsTask
+                detailsResults.append(detailsResult)
+            else:
+                detailsResults.append(None)
+        
+        # Compile all results
         results = []
         for geocodeResult, autoCompleteResult, detailsResult in zip(geocodeResults, autoCompleteResults, detailsResults):
             result = {
@@ -300,6 +311,7 @@ async def getAllPlaceDetails(names: list[str], addresses: list[str]):
 
         print(f"geocoding results:\n{results}")
     return results
+
 
 # Get lat, long, and place_id from Google Geocoding API
 async def getCoordinatesGoogle(client, address):
@@ -333,7 +345,7 @@ async def getCoordinatesGoogle(client, address):
 
 # Get precise place ID from Google Autocomplete API 
 async def getPlaceFromAutocomplete(client, input, coordinates):
-    initialRadius = 2500
+    initialRadius = 5000
     maxRadius = 20000
     increment = 5000
 
@@ -394,7 +406,7 @@ async def getPlaceFromAutocomplete(client, input, coordinates):
     }
 
     response = await client.post(autocompleteUrl, headers=headers, json=body)
-    print(f"FALLBACK: Attempting input {input} with coordinates {coordinates['latitude']}, {coordinates['longitude']}")
+    print(f"FALLBACK: Attempting input {input} with no coordinates")
     if response.status_code == 200:
         try:
             data = response.json()
@@ -419,6 +431,9 @@ async def getPlaceFromAutocomplete(client, input, coordinates):
 # Get place details from Google Place Details API using Place ID
 async def getPlaceDetailsFromId(client, placeId):
     googleAPIKey = os.getenv("GOOGLE_API_KEY")
+    if not googleAPIKey:
+        logger.error("Google API key is not set in the environment variables.")
+        raise ValueError("Missing Google API key.")
     fields = "id,displayName,primaryType,primaryTypeDisplayName,types,websiteUri,googleMapsUri,internationalPhoneNumber,nationalPhoneNumber,containingPlaces,viewport"
     headers = {
         'Content-Type': 'application/json',
@@ -434,16 +449,16 @@ async def getPlaceDetailsFromId(client, placeId):
             if result is not None:
                 ## TODO: Use new fields 
                 return {
-                    "id": result["id"],
-                    "displayName": result["displayName"],
-                    "primaryType": result["primaryType"],
-                    "primaryTypeDisplayName": result["primaryTypeDisplayName"],
-                    "types": result["types"],
-                    "websiteUri": result["websiteUri"],
-                    "googleMapsUri": result["googleMapsUri"],
-                    "internationalPhoneNumber": result["internationalPhoneNumber"],
-                    "nationalPhoneNumber": result["nationalPhoneNumber"],
-                    "viewport": result["viewport"]
+                    "id": result.get("id"),
+                    "displayName": result.get("displayName"),
+                    "primaryType": result.get("primaryType"),
+                    "primaryTypeDisplayName": result.get("primaryTypeDisplayName"),
+                    "types": result.get("types"),
+                    "websiteUri": result.get("websiteUri"),
+                    "googleMapsUri": result.get("googleMapsUri"),
+                    "internationalPhoneNumber": result.get("internationalPhoneNumber"),
+                    "nationalPhoneNumber": result.get("nationalPhoneNumber"),
+                    "viewport": result.get("viewport"),
                 }
             else:
                 print(f"No result found for placeId: {placeId}")
@@ -454,6 +469,19 @@ async def getPlaceDetailsFromId(client, placeId):
     except Exception as e:
         print(f"Exception occurred while fetching place details for placeId: {placeId}: {e}")
         return None
+
+# Assigns isAirport attribute of place
+def checkIfAirport(place):
+    placeDetails = place["details"]
+    if placeDetails is not None:
+        primaryType = placeDetails.get("primaryType")
+        types = placeDetails.get("types", [])
+        if primaryType == "international_airport" or "international_airport" in types or "airport" in types:
+            place["isAirport"] = True
+        else:
+            place["isAirport"] = False
+    else:
+        place["isAirport"] = False
 
 # Get place type and details from Google Text Search API
 async def getPlaceDetailsFromText(client, textQuery):
@@ -501,21 +529,6 @@ async def getPlaceDetailsFromText(client, textQuery):
     except Exception as e:
         print(f"Exception occurred while fetching places for query '{textQuery}': {e}")
         return None
-
-# Assigns isAirport attribute of place
-def checkIfAirport(place):
-    placeDetails = place["details"]
-    if placeDetails is not None:
-        primaryType = placeDetails.get("primaryType")
-        types = placeDetails.get("types", [])
-        if primaryType == "international_airport" or "international_airport" in types or "airport" in types:
-            place["isAirport"] = True
-        else:
-            place["isAirport"] = False
-    else:
-        place["isAirport"] = False
-
-
 
 # Get GeoJSON routes from Mapbox Directions API
 
