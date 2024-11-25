@@ -18,6 +18,11 @@ import os
 import re
 import httpx
 import asyncio
+import logging
+
+# Configure logging
+#logging.basicConfig(level=logging.INFO)
+#logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -328,6 +333,10 @@ async def getCoordinatesGoogle(client, address):
 
 # Get precise place ID from Google Autocomplete API 
 async def getPlaceFromAutocomplete(client, input, coordinates):
+    initialRadius = 2500
+    maxRadius = 20000
+    increment = 5000
+
     apiKey = os.getenv("GOOGLE_API_KEY")
     autocompleteUrl = "https://places.googleapis.com/v1/places:autocomplete"
     headers = {
@@ -339,39 +348,72 @@ async def getPlaceFromAutocomplete(client, input, coordinates):
     """ body = {
         "input": input,
     }
- """# Restrict 2.5km within coordinates
-    body = {
-        "input": input,
-        "locationRestriction": {
-            "circle": {
-                "center": {
-                    "latitude": coordinates['latitude'],
-                    "longitude": coordinates['longitude']
-                },
-            "radius": 2500.0
+ """
+    radius = initialRadius
+    while radius <= maxRadius:
+        body = {
+            "input": input,
+            "locationRestriction": {
+                "circle": {
+                    "center": {
+                        "latitude": coordinates['latitude'],
+                        "longitude": coordinates['longitude']
+                    },
+                "radius": radius
+                }
             }
         }
-    }
 
-    try:
         response = await client.post(autocompleteUrl, headers=headers, json=body)
-        if response.status_code == 200:
-            data = response.json()
-            # Get long name and placeId from prediction
-            if data["suggestions"]:
-                prediction = data["suggestions"][0]["placePrediction"]
+        print(f"Attempting input {input} with coordinates {coordinates['latitude']}, {coordinates['longitude']}, radius {radius}")
+        if response.status_code == 200 and response.content:
+            try:
+                data = response.json()
+            except Exception as e:
+                print(f"Exception occurred while parsing JSON response: {e}")
+                radius += increment
+                continue
+            # Check if suggestions key exists
+            suggestions = data.get('suggestions', [])
+            if suggestions:
+                prediction = suggestions[0]["placePrediction"]
                 return {
                     "precisePlaceId": prediction["placeId"],
                     "text": prediction['text']['text']
                 }
             else:
-                print(f"No results found for query: {input}")
-                return None
+                print(f"No results found for query {input} with radius: {radius}m")
+                radius += increment
         else:
             print(f"Error fetching results for query {input}: {response.text}")
+            break
+
+    # Attempt without location restriction 
+    body = {
+        "input": input,
+    }
+
+    response = await client.post(autocompleteUrl, headers=headers, json=body)
+    print(f"FALLBACK: Attempting input {input} with coordinates {coordinates['latitude']}, {coordinates['longitude']}")
+    if response.status_code == 200:
+        try:
+            data = response.json()
+        except Exception as e:
+            print(f"Exception occurred while parsing JSON response in fallback: {e}")
             return None
-    except Exception as e:
-        print(f"Exception occurred while fetching places for query '{input}': {e}")
+        # Check if suggestions key exists
+        suggestions = data.get('suggestions', [])
+        if suggestions:
+            prediction = suggestions[0]["placePrediction"]
+            return {
+                "precisePlaceId": prediction["placeId"],
+                "text": prediction['text']['text']
+            }
+        else:
+            print(f"No results found for query {input} with no radius restriction.")
+            return None
+    else:
+        print(f"Error fetching fallback results for query {input}: {response.text}")
         return None
     
 # Get place details from Google Place Details API using Place ID
