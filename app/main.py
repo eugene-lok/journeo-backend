@@ -81,10 +81,9 @@ systemPrompt = (
 
     f"### Itinerary Format:\n"
     f"1. Title it 'Your Itinerary'. **This is mandatory. Do not use this phrase elsewhere.**\n"
-    f"2. Organize the itinerary by days. The first and last days are for travel:\n"
-    f"   - First day: Travel from the origin to the destination.\n"
-    f"   - Last day: Travel back from the destination to the origin.\n"
-    f"3. For each location you suggest, use the following mandatory format. Recommend at least 2 locations per day unless the single location will take a full day to visit:\n"
+    f"2. Organize the itinerary by days. For each day:\n"
+    f"   - **Accommodation:** Include name, address, price range, and a brief description.\n"
+    f"3. For each location and the accomodation you suggest, use the following mandatory format. Recommend at least 2 locations per day:\n"
     f"   - **Name:** [Always start with this.]\n"
     f"   - **Address:** [Provide the exact, real address on a new line. Do not use placeholders like '[Your Hotel Address]']\n"
     f"   - **Description:** [Provide a brief description]\n\n"
@@ -483,54 +482,9 @@ def checkIfAirport(place):
     else:
         place["isAirport"] = False
 
-# Get place type and details from Google Text Search API
-async def getPlaceDetailsFromText(client, textQuery):
-    googleAPIKey = os.getenv("GOOGLE_API_KEY")
-    # Field mask
-    fields = "places.id,places.displayName,places.formattedAddress,places.primaryType,places.googleMapsUri,places.websiteUri,places.rating,places.photos"
-    # Construct request params and body
-    textSearchUrl = "https://places.googleapis.com/v1/places:searchText"
-    headers = {
-        'Content-Type': 'application/json',
-        'X-Goog-Api-Key': googleAPIKey,
-        'X-Goog-FieldMask': fields
-    }
-    body = {
-        "textQuery": textQuery,
-    }
-    try:
-        response = await client.post(textSearchUrl, headers=headers, json=body)
-        if response.status_code == 200:
-            data = response.json()
-            #print(data)
-            if 'places' in data:
-                places = data['places']
-                results = []
-                # Map data
-                for place in places:
-                    results.append({
-                        "googlePlaceId": place["id"],
-                        "displayName": place["displayName"],
-                        "formattedAddress": place["formattedAddress"],
-                        "primaryType": place["primaryType"],
-                        "googleMapsUri": place["googleMapsUri"],
-                        "websiteUri": place["websiteUri"],
-                        "rating": place["rating"],
-                        #"photos": places['photos']
-                    })
-                print(f"results: {results}")
-                return results
-            else:
-                print(f"No places found for query: {textQuery}")
-                return None
-        else:
-            print(f"Error fetching places for query '{textQuery}': {response.text}")
-            return None
-    except Exception as e:
-        print(f"Exception occurred while fetching places for query '{textQuery}': {e}")
-        return None
 
 # Get GeoJSON routes from Mapbox Directions API
+
 
 # Get lat, long from Mapbox Geocoding API 
 """ async def getCoordinates(client, address):
@@ -544,7 +498,6 @@ async def getPlaceDetailsFromText(client, textQuery):
             coords = data["features"][0]["geometry"]["coordinates"]
             return {"latitude": coords[1], "longitude": coords[0]}
         return None """
-
 
 # Generates itinerary and fetches coordinates
 """
