@@ -12,13 +12,12 @@ from langchain.prompts import (
 )
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
 from app.mapboxRoutes import getRouteFromMapbox
-
+from app.loggerConfig import logger
 #from app.auth import authRouter
 import os
 import re
 import httpx
 import asyncio
-import logging
 
 # Configure logging
 #logging.basicConfig(level=logging.INFO)
@@ -40,6 +39,10 @@ llm = ChatOpenAI(
     max_retries=2,
     api_key=os.getenv("OPENAI_API_KEY")
 )
+
+
+## Put in options for adults and kids
+## Implement different budget options, don't have to ask for budget
 
 systemPrompt = (
     f"You are a travel agent. Your job is to generate a complete itinerary based on the user’s input. "
@@ -394,7 +397,7 @@ async def getPlaceFromAutocomplete(client, input, coordinates):
     }
 
     response = await client.post(autocompleteUrl, headers=headers, json=body)
-    print(f"FALLBACK: Attempting input {input} with coordinates {coordinates['latitude']}, {coordinates['longitude']}")
+    print(f"FALLBACK: Attempting input {input} with no coordinates")
     if response.status_code == 200:
         try:
             data = response.json()
@@ -419,6 +422,9 @@ async def getPlaceFromAutocomplete(client, input, coordinates):
 # Get place details from Google Place Details API using Place ID
 async def getPlaceDetailsFromId(client, placeId):
     googleAPIKey = os.getenv("GOOGLE_API_KEY")
+    if not googleAPIKey:
+        logger.error("Google API key is not set in the environment variables.")
+        raise ValueError("Missing Google API key.")
     fields = "id,displayName,primaryType,primaryTypeDisplayName,types,websiteUri,googleMapsUri,internationalPhoneNumber,nationalPhoneNumber,containingPlaces,viewport"
     headers = {
         'Content-Type': 'application/json',
@@ -434,16 +440,16 @@ async def getPlaceDetailsFromId(client, placeId):
             if result is not None:
                 ## TODO: Use new fields 
                 return {
-                    "id": result["id"],
-                    "displayName": result["displayName"],
-                    "primaryType": result["primaryType"],
-                    "primaryTypeDisplayName": result["primaryTypeDisplayName"],
-                    "types": result["types"],
-                    "websiteUri": result["websiteUri"],
-                    "googleMapsUri": result["googleMapsUri"],
-                    "internationalPhoneNumber": result["internationalPhoneNumber"],
-                    "nationalPhoneNumber": result["nationalPhoneNumber"],
-                    "viewport": result["viewport"]
+                    "id": result.get("id"),
+                    "displayName": result.get("displayName"),
+                    "primaryType": result.get("primaryType"),
+                    "primaryTypeDisplayName": result.get("primaryTypeDisplayName"),
+                    "types": result.get("types"),
+                    "websiteUri": result.get("websiteUri"),
+                    "googleMapsUri": result.get("googleMapsUri"),
+                    "internationalPhoneNumber": result.get("internationalPhoneNumber"),
+                    "nationalPhoneNumber": result.get("nationalPhoneNumber"),
+                    "viewport": result.get("viewport"),
                 }
             else:
                 print(f"No result found for placeId: {placeId}")
@@ -454,6 +460,19 @@ async def getPlaceDetailsFromId(client, placeId):
     except Exception as e:
         print(f"Exception occurred while fetching place details for placeId: {placeId}: {e}")
         return None
+
+# Assigns isAirport attribute of place
+def checkIfAirport(place):
+    placeDetails = place["details"]
+    if placeDetails is not None:
+        primaryType = placeDetails.get("primaryType")
+        types = placeDetails.get("types", [])
+        if primaryType == "international_airport" or "international_airport" in types or "airport" in types:
+            place["isAirport"] = True
+        else:
+            place["isAirport"] = False
+    else:
+        place["isAirport"] = False
 
 # Get place type and details from Google Text Search API
 async def getPlaceDetailsFromText(client, textQuery):
@@ -501,21 +520,6 @@ async def getPlaceDetailsFromText(client, textQuery):
     except Exception as e:
         print(f"Exception occurred while fetching places for query '{textQuery}': {e}")
         return None
-
-# Assigns isAirport attribute of place
-def checkIfAirport(place):
-    placeDetails = place["details"]
-    if placeDetails is not None:
-        primaryType = placeDetails.get("primaryType")
-        types = placeDetails.get("types", [])
-        if primaryType == "international_airport" or "international_airport" in types or "airport" in types:
-            place["isAirport"] = True
-        else:
-            place["isAirport"] = False
-    else:
-        place["isAirport"] = False
-
-
 
 # Get GeoJSON routes from Mapbox Directions API
 
