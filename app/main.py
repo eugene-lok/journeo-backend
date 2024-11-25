@@ -11,7 +11,7 @@ from langchain.prompts import (
     MessagesPlaceholder
 )
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
-
+from app.mapboxRoutes import getRouteFromMapbox
 
 #from app.auth import authRouter
 import os
@@ -42,7 +42,7 @@ systemPrompt = (
     f"- **Trip duration** (phrased as 'X days', 'X-day trip', 'a week', or 'from date A to date B').\n"
     f"- **Trip origin** (phrased as 'from X', 'starting in X', or 'origin is X').\n"
     f"- **Trip destination** (phrased as 'to X', 'destination is X', or 'visit X').\n"
-    f"- **Number of travellers** (phrased as 'for X people, 'with X people', or 'X people going').\n"
+    f"- **Number of travellers** (phrased as 'for X people', 'with X people', 'X people going', 'alone', or 'solo').\n"
     f"- **Trip budget** (phrased as '$X', 'a budget of X', or 'around X').\n\n"
 
     f"### Duration Handling:\n"
@@ -55,7 +55,7 @@ systemPrompt = (
     f"**If the user specifies the destination with phrases like 'to X', 'destination is X', or 'visit X', assume the destination is complete and do not ask for it again.**\n\n"
 
     f"### Number of Travellers Handling:\n"
-    f"**If the user specifies the number of travellers with phrases like 'for X people, 'with X people', or 'X people going', assume the number of travellers is complete and do not ask for it again.**\n\n"
+    f"**If the user specifies the number of travellers with phrases like 'for X people', 'with X people', 'X people going', 'alone', or 'solo', assume the number of travellers is complete and do not ask for it again. Interpret 'alone' or 'solo' as 1 traveller.**\n\n"
 
     f"### Budget Handling:\n"
     f"**If the user specifies the budget with phrases like '$X', 'a budget of X', or 'around X', assume the budget is complete and do not ask for it again.**\n\n"
@@ -63,8 +63,9 @@ systemPrompt = (
     f"### Handling Changes:\n"
     f"- **If the user requests a change to their itinerary, do not reclarify all parameters unless explicitly asked to.**\n"
     f"- **First, ask the user: 'Would you like to keep the rest of the trip the same?'**\n"
-    f"- If the user wants to keep the rest of the trip the same, make only the requested change and regenerate the itinerary.\n"
-    f"- If the user wants to modify other aspects, clarify only the specific parameters they want to change and retain the rest of the inputs.\n\n"
+    f"  - **If the user responds affirmatively (e.g., 'Yes, keep the rest the same'), apply the requested change and regenerate the itinerary.**\n"
+    f"  - **If the user wants to modify other aspects, ask specifically which parameters they would like to change and retain the rest of the inputs.**\n"
+    f"- **Ensure that only the modified parameters are updated while others remain unchanged.**\n\n"
 
     f"### Completion Handling:\n"
     f"Once the user provides all five parameters (trip duration, origin, destination, number of travellers, and budget), you must generate the itinerary immediately without asking further questions or clarifying anything. "
@@ -76,14 +77,20 @@ systemPrompt = (
     f"   - First day: Travel from the origin to the destination.\n"
     f"   - Last day: Travel back from the destination to the origin.\n"
     f"3. For each location you suggest, use the following mandatory format. Recommend at least 2 locations per day unless the single location will take a full day to visit:\n"
-    f"   - **Name:** [Always start with this]\n"
-    f"   - **Address:** [This must be on a new line]\n"
+    f"   - **Name:** [Always start with this.]\n"
+    f"   - **Address:** [Provide the exact, real address on a new line. Do not use placeholders like '[Your Hotel Address]']\n"
     f"   - **Description:** [Provide a brief description]\n\n"
+    f"4. **Ensure all addresses are precise and verifiable. For known locations like airports, use their official addresses.**\n\n"
+
     f"After the itinerary, include a 'Budget Breakdown' section.\n\n"
+
     f"Under no circumstances should you:\n"
     f"- Ask for additional information or preferences after all inputs are received.\n"
-    f"- Delay generating the itinerary."
+    f"- Delay generating the itinerary.\n"
+    f"- Use placeholder text for addresses.\n"
+    f"- Provide vague or imprecise addresses.\n"
 )
+
 
 
 systemMessage = SystemMessagePromptTemplate.from_template(systemPrompt)
@@ -135,20 +142,25 @@ async def chatResponse(message: UserMessage):
             addressPattern = r"\*\*Address:\*\*\s(.*?)(?=\n)"
             addresses: list[str] = re.findall(addressPattern, itineraryContent)
 
-            # Get coordinates of addresses
-            coordinates = await geocodeLocations(addresses)
+            # Get coordinates and googlePlaceId of addresses
+            placesInfo = await getAllPlaceDetails(names, addresses)
 
             # Places
             places = []
 
             # Assign attributes to each place
-            for id, (name, address, coordinate) in enumerate(zip(names, addresses, coordinates)):
+            for id, (name, address, placeInfo) in enumerate(zip(names, addresses, placesInfo)):
                 place = {
                     "id": id,
                     "name": name,
+                    "isAirport": None,
                     "address": address,
-                    "coordinates": coordinate
+                    "initialPlaceId": placeInfo['initialPlaceId'],
+                    "coordinates": placeInfo['coordinates'],
+                    "predictedLocation": placeInfo['placePrediction'],
+                    "details": placeInfo['details']
                 }
+                checkIfAirport(place)
                 places.append(place)
 
             # Prepare response data
@@ -157,7 +169,70 @@ async def chatResponse(message: UserMessage):
                 "places": places
             }
 
-            print(responseData)
+            routes = []
+
+            if len(places) >= 2:
+                # List of consecutive place pairs
+                consecutivePairs = []
+                for i in range(len(places) - 1):
+                    fromPlace = places[i]
+                    toPlace = places[i + 1]
+                    consecutivePairs.append((fromPlace, toPlace))
+
+                # Filter out pairs where both are airports
+                nonAirportPairs = []
+                for fromPlace, toPlace in consecutivePairs:
+                    if not (fromPlace.get("isAirport", False) and toPlace.get("isAirport", False)):
+                        nonAirportPairs.append((fromPlace, toPlace))
+
+                # Create route fetching tasks and keep track of pairs
+                routeTasks = []
+                routePairs = []
+
+                async with httpx.AsyncClient() as client:
+                    for fromPlace, toPlace in nonAirportPairs:
+                        task = getRouteFromMapbox(
+                            client,
+                            startCoords=fromPlace["coordinates"],
+                            endCoords=toPlace["coordinates"]
+                        )
+                        routeTasks.append(task)
+                        routePairs.append((fromPlace, toPlace))
+
+                    # Gather all route tasks
+                    route_results = await asyncio.gather(*routeTasks, return_exceptions=True)
+
+                # Add route pairs and routes
+                for index, result in enumerate(route_results):
+                    fromPlace, toPlace = routePairs[index]
+
+                    # Check for exception
+                    if isinstance(result, Exception):
+                        print(f"Failed to fetch route between {fromPlace['name']} and {toPlace['name']}: {result}")
+                        continue 
+                    
+                    # Append routes to list
+                    if result:
+                        routes.append({
+                            "from": {
+                                "id": fromPlace["id"],
+                                "name": fromPlace["name"],
+                                "coordinates": fromPlace["coordinates"]
+                            },
+                            "to": {
+                                "id": toPlace["id"],
+                                "name": toPlace["name"],
+                                "coordinates": toPlace["coordinates"]
+                            },
+                            "route": result 
+                        })
+                    else:
+                        print(f"No route found between {fromPlace['name']} and {toPlace['name']}.")
+
+            # Add routes to response 
+            responseData["routes"] = routes
+
+            #print(responseData)
             # Return formatted response
             botResponse = {"response": responseData}
             return JSONResponse(content=botResponse)
@@ -168,9 +243,256 @@ async def chatResponse(message: UserMessage):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Geocode list of addresses in parallel requests and fetches place details in parallel
+async def getAllPlaceDetails(names: list[str], addresses: list[str]):
+    async with httpx.AsyncClient() as client:
+        geocodeTasks = []
+        autoCompleteTasks = []
+        detailsTasks = []
+
+        # Geocode addresses to obtain coordinates and placeId 
+        for name, address in zip(names, addresses):
+            geocodeTask = getCoordinatesGoogle(client, address)
+            geocodeTasks.append(geocodeTask)
+            # Get place details from combination of name of address
+            #longAddress = f"{name}"
+            # longAddress = f"{name}, {address}"
+            #detailTasks = getPlaceDetails(client, longAddress)
+            #autoCompleteTasks = getPlaceFromAutocomplete(client, longAddress)
+            #allTasks.append(asyncio.gather(geocodeTasks,detailTasks))
+            #allTasks.append(asyncio.gather(geocodeTasks, autoCompleteTasks))
+        geocodeResults = await asyncio.gather(*geocodeTasks)
+        # Obtain coordinates from geocoded addresses
+        coordinates = []
+        coordinates = [geocodeResult['coordinates'] for geocodeResult in geocodeResults]
+        
+        # Use name and coordinates to fetch precise placeId
+        for name, coordinate in zip(names, coordinates):
+            autoCompleteTask = getPlaceFromAutocomplete(client, name, coordinate)
+            autoCompleteTasks.append(autoCompleteTask)
+        autoCompleteResults = await asyncio.gather(*autoCompleteTasks)
+        # Obtain new place Ids from queried locations
+        precisePlaceIds = []
+        precisePlaceIds = [autoCompleteResult['precisePlaceId'] for autoCompleteResult in autoCompleteResults]
+
+        for precisePlaceId in precisePlaceIds:
+            detailsTask = getPlaceDetailsFromId(client, precisePlaceId)
+            detailsTasks.append(detailsTask)
+        detailsResults = await asyncio.gather(*detailsTasks)
+        # 
+        #allResults = await asyncio.gather(*allTasks)
+        results = []
+        for geocodeResult, autoCompleteResult, detailsResult in zip(geocodeResults, autoCompleteResults, detailsResults):
+            result = {
+                "initialPlaceId": geocodeResult['placeId'],
+                "coordinates": geocodeResult['coordinates'],
+                "placePrediction": autoCompleteResult,
+                "details": detailsResult
+            }
+            results.append(result)
+
+        print(f"geocoding results:\n{results}")
+    return results
+
+# Get lat, long, and place_id from Google Geocoding API
+async def getCoordinatesGoogle(client, address):
+    print(f"Address: {address}")
+    googleAPIKey = os.getenv("GOOGLE_API_KEY")
+    geocodeUrl = f"https://maps.googleapis.com/maps/api/geocode/json?address={address}&key={googleAPIKey}"
+    try:
+        response = await client.get(geocodeUrl)
+        if response.status_code == 200:
+            data = response.json()
+            if data["results"]:
+                location = data["results"][0]["geometry"]["location"]
+                placeId = data["results"][0]["place_id"]
+                #print(data["results"][0]["geometry"])
+                return {
+                    "coordinates": {
+                        "latitude": location["lat"],
+                        "longitude": location["lng"]
+                    },
+                    "placeId": placeId,
+                }
+            else:
+                print(f"No results found for address: {address}")
+                return None
+        else:
+            print(f"Error fetching coordinates for address {address}: {response.text}")
+            return None
+    except Exception as e:
+        print(f"Exception occurred while fetching coordinates for address {address}: {e}")
+        return None
+
+# Get precise place ID from Google Autocomplete API 
+async def getPlaceFromAutocomplete(client, input, coordinates):
+    apiKey = os.getenv("GOOGLE_API_KEY")
+    autocompleteUrl = "https://places.googleapis.com/v1/places:autocomplete"
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': apiKey,
+        'X-Goog-FieldMask': "*"
+    }
     
+    """ body = {
+        "input": input,
+    }
+ """# Restrict 2.5km within coordinates
+    body = {
+        "input": input,
+        "locationRestriction": {
+            "circle": {
+                "center": {
+                    "latitude": coordinates['latitude'],
+                    "longitude": coordinates['longitude']
+                },
+            "radius": 2500.0
+            }
+        }
+    }
+
+    try:
+        response = await client.post(autocompleteUrl, headers=headers, json=body)
+        if response.status_code == 200:
+            data = response.json()
+            # Get long name and placeId from prediction
+            if data["suggestions"]:
+                prediction = data["suggestions"][0]["placePrediction"]
+                return {
+                    "precisePlaceId": prediction["placeId"],
+                    "text": prediction['text']['text']
+                }
+            else:
+                print(f"No results found for query: {input}")
+                return None
+        else:
+            print(f"Error fetching results for query {input}: {response.text}")
+            return None
+    except Exception as e:
+        print(f"Exception occurred while fetching places for query '{input}': {e}")
+        return None
+    
+# Get place details from Google Place Details API using Place ID
+async def getPlaceDetailsFromId(client, placeId):
+    googleAPIKey = os.getenv("GOOGLE_API_KEY")
+    fields = "id,displayName,primaryType,primaryTypeDisplayName,types,websiteUri,googleMapsUri,internationalPhoneNumber,nationalPhoneNumber,containingPlaces,viewport"
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': googleAPIKey,
+        'X-Goog-FieldMask': fields
+    }
+    placeDetailsUrl = f"https://places.googleapis.com/v1/places/{placeId}"
+    try:
+        response = await client.get(placeDetailsUrl, headers=headers)
+        if response.status_code == 200:
+            result = response.json()
+            print(f"RESPONSE:{result}")
+            if result is not None:
+                ## TODO: Use new fields 
+                return {
+                    "id": result["id"],
+                    "displayName": result["displayName"],
+                    "primaryType": result["primaryType"],
+                    "primaryTypeDisplayName": result["primaryTypeDisplayName"],
+                    "types": result["types"],
+                    "websiteUri": result["websiteUri"],
+                    "googleMapsUri": result["googleMapsUri"],
+                    "internationalPhoneNumber": result["internationalPhoneNumber"],
+                    "nationalPhoneNumber": result["nationalPhoneNumber"],
+                    "viewport": result["viewport"]
+                }
+            else:
+                print(f"No result found for placeId: {placeId}")
+                return None
+        else:
+            print(f"Error fetching place details for placeId {placeId}: {response.text}")
+            return None
+    except Exception as e:
+        print(f"Exception occurred while fetching place details for placeId: {placeId}: {e}")
+        return None
+
+# Get place type and details from Google Text Search API
+async def getPlaceDetailsFromText(client, textQuery):
+    googleAPIKey = os.getenv("GOOGLE_API_KEY")
+    # Field mask
+    fields = "places.id,places.displayName,places.formattedAddress,places.primaryType,places.googleMapsUri,places.websiteUri,places.rating,places.photos"
+    # Construct request params and body
+    textSearchUrl = "https://places.googleapis.com/v1/places:searchText"
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': googleAPIKey,
+        'X-Goog-FieldMask': fields
+    }
+    body = {
+        "textQuery": textQuery,
+    }
+    try:
+        response = await client.post(textSearchUrl, headers=headers, json=body)
+        if response.status_code == 200:
+            data = response.json()
+            #print(data)
+            if 'places' in data:
+                places = data['places']
+                results = []
+                # Map data
+                for place in places:
+                    results.append({
+                        "googlePlaceId": place["id"],
+                        "displayName": place["displayName"],
+                        "formattedAddress": place["formattedAddress"],
+                        "primaryType": place["primaryType"],
+                        "googleMapsUri": place["googleMapsUri"],
+                        "websiteUri": place["websiteUri"],
+                        "rating": place["rating"],
+                        #"photos": places['photos']
+                    })
+                print(f"results: {results}")
+                return results
+            else:
+                print(f"No places found for query: {textQuery}")
+                return None
+        else:
+            print(f"Error fetching places for query '{textQuery}': {response.text}")
+            return None
+    except Exception as e:
+        print(f"Exception occurred while fetching places for query '{textQuery}': {e}")
+        return None
+
+# Assigns isAirport attribute of place
+def checkIfAirport(place):
+    placeDetails = place["details"]
+    if placeDetails is not None:
+        primaryType = placeDetails.get("primaryType")
+        types = placeDetails.get("types", [])
+        if primaryType == "international_airport" or "international_airport" in types or "airport" in types:
+            place["isAirport"] = True
+        else:
+            place["isAirport"] = False
+    else:
+        place["isAirport"] = False
+
+
+
+# Get GeoJSON routes from Mapbox Directions API
+
+# Get lat, long from Mapbox Geocoding API 
+""" async def getCoordinates(client, address):
+    print(f"Address: {address}")
+    accessToken = os.getenv("MAPBOX_ACCESS_TOKEN")
+    geocodeUrl = f"https://api.mapbox.com/search/geocode/v6/forward?q={address}&access_token={accessToken}"
+    response = await client.get(geocodeUrl)
+    if response.status_code == 200:
+        data = response.json()
+        if data["features"]:
+            coords = data["features"][0]["geometry"]["coordinates"]
+            return {"latitude": coords[1], "longitude": coords[0]}
+        return None """
+
 
 # Generates itinerary and fetches coordinates
+"""
 @app.post("/api/generateItinerary/")
 async def generateItinerary(userItinerary: UserItinerary):
     # Prepare the prompt for the OpenAI API
@@ -223,19 +545,20 @@ async def generateItinerary(userItinerary: UserItinerary):
     addressPattern = r"\*\*Address:\*\*\s(.*?)(?=\n)"
     addresses: list[str] = re.findall(addressPattern, itineraryContent)
 
-    # Get coordinates of addresses
-    coordinates = await geocodeLocations(addresses)
+    # Get coordinates and googlePlaceId of addresses
+    googlePlaceInfo = await geocodeLocations(addresses)
 
     # Places 
     places = []
 
     # Assign attributes to each place
-    for id, (name, address, coordinate) in enumerate(zip(names, addresses, coordinates)):
+    for id, (name, address, googlePlace) in enumerate(zip(names, addresses, googlePlaceInfo)):
         place = {
             "id": id,
+            "type": "placeholder",
             "name": name,
             "address": address,
-            "coordinates": coordinate
+            "coordinates": googlePlace
         }
 
         places.append(place)
@@ -248,28 +571,5 @@ async def generateItinerary(userItinerary: UserItinerary):
 
     print(response_data)
     # Return formatted response
-    return response_data
+    return response_data """
 
-# Get lat, long from Mapbox Geocoding API 
-async def getCoordinates(client, address):
-    print(f"Address: {address}")
-    accessToken = os.getenv("MAPBOX_ACCESS_TOKEN")
-    geocodeUrl = f"https://api.mapbox.com/search/geocode/v6/forward?q={address}&access_token={accessToken}"
-    response = await client.get(geocodeUrl)
-    if response.status_code == 200:
-        data = response.json()
-        if data["features"]:
-            coords = data["features"][0]["geometry"]["coordinates"]
-            return {"latitude": coords[1], "longitude": coords[0]}
-        return None
-
-# Geocode list of addresses in parallel requests 
-async def geocodeLocations(addresses: list[str]):
-    async with httpx.AsyncClient() as client:
-        tasks = [getCoordinates(client, address) for address in addresses]
-        results = await asyncio.gather(*tasks)
-    return results
-
-# Get place types from Google Places API 
-
-# Get GeoJSON routes from Mapbox Directions API
