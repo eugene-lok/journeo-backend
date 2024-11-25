@@ -34,7 +34,7 @@ addCorsMiddleware(app)
 llm = ChatOpenAI(
     model="gpt-4o-mini",
     temperature=0.7,
-    max_tokens=1000,
+    max_tokens=1500,
     timeout=None,
     max_retries=2,
     api_key=os.getenv("OPENAI_API_KEY")
@@ -261,19 +261,11 @@ async def getAllPlaceDetails(names: list[str], addresses: list[str]):
         detailsTasks = []
 
         # Geocode addresses to obtain coordinates and placeId 
-        for name, address in zip(names, addresses):
+        for address in addresses:
             geocodeTask = getCoordinatesGoogle(client, address)
             geocodeTasks.append(geocodeTask)
-            # Get place details from combination of name of address
-            #longAddress = f"{name}"
-            # longAddress = f"{name}, {address}"
-            #detailTasks = getPlaceDetails(client, longAddress)
-            #autoCompleteTasks = getPlaceFromAutocomplete(client, longAddress)
-            #allTasks.append(asyncio.gather(geocodeTasks,detailTasks))
-            #allTasks.append(asyncio.gather(geocodeTasks, autoCompleteTasks))
         geocodeResults = await asyncio.gather(*geocodeTasks)
         # Obtain coordinates from geocoded addresses
-        coordinates = []
         coordinates = [geocodeResult['coordinates'] for geocodeResult in geocodeResults]
         
         # Use name and coordinates to fetch precise placeId
@@ -281,16 +273,32 @@ async def getAllPlaceDetails(names: list[str], addresses: list[str]):
             autoCompleteTask = getPlaceFromAutocomplete(client, name, coordinate)
             autoCompleteTasks.append(autoCompleteTask)
         autoCompleteResults = await asyncio.gather(*autoCompleteTasks)
-        # Obtain new place Ids from queried locations
-        precisePlaceIds = []
-        precisePlaceIds = [autoCompleteResult['precisePlaceId'] for autoCompleteResult in autoCompleteResults]
 
+        # Obtain new place IDs from queried locations
+        precisePlaceIds = []
+        for autoCompleteResult in autoCompleteResults:
+            if autoCompleteResult is not None:
+                precisePlaceIds.append(autoCompleteResult['precisePlaceId'])
+            else:
+                precisePlaceIds.append(None)
+
+        # Fetch place details using precisePlaceIds
         for precisePlaceId in precisePlaceIds:
-            detailsTask = getPlaceDetailsFromId(client, precisePlaceId)
-            detailsTasks.append(detailsTask)
-        detailsResults = await asyncio.gather(*detailsTasks)
-        # 
-        #allResults = await asyncio.gather(*allTasks)
+            if precisePlaceId is not None:
+                detailsTask = getPlaceDetailsFromId(client, precisePlaceId)
+                detailsTasks.append(detailsTask)
+            else:
+                detailsTasks.append(None)
+        # Await all details tasks
+        detailsResults = []
+        for detailsTask in detailsTasks:
+            if detailsTask is not None:
+                detailsResult = await detailsTask
+                detailsResults.append(detailsResult)
+            else:
+                detailsResults.append(None)
+        
+        # Compile all results
         results = []
         for geocodeResult, autoCompleteResult, detailsResult in zip(geocodeResults, autoCompleteResults, detailsResults):
             result = {
@@ -303,6 +311,7 @@ async def getAllPlaceDetails(names: list[str], addresses: list[str]):
 
         print(f"geocoding results:\n{results}")
     return results
+
 
 # Get lat, long, and place_id from Google Geocoding API
 async def getCoordinatesGoogle(client, address):
@@ -336,7 +345,7 @@ async def getCoordinatesGoogle(client, address):
 
 # Get precise place ID from Google Autocomplete API 
 async def getPlaceFromAutocomplete(client, input, coordinates):
-    initialRadius = 2500
+    initialRadius = 5000
     maxRadius = 20000
     increment = 5000
 
