@@ -13,16 +13,58 @@ from langchain.prompts import (
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
 from app.mapboxRoutes import getRouteFromMapbox
 from app.loggerConfig import logger
-from app.geoTools.geocoding import getAllPlaceDetails, getCoordinatesGoogle, getPlaceDetailsFromId, getPlaceFromAutocomplete, checkIfAirport
+from app.geoTools.geocoding import *
 #from app.auth import authRouter
 import os
 import re
 import httpx
 import asyncio
+import json
 
 # Configure logging
 #logging.basicConfig(level=logging.INFO)
 #logger = logging.getLogger(__name__)
+
+
+
+responseFormat = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "itinerary",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "day": {"type": "integer"},
+                            "places": {
+                                "type": "array",
+                                "items": {  
+                                    "type": "object",
+                                    "properties": {
+                                        "name": { "type": "string" },
+                                        "address": { "type": "string" },
+                                        "description": { "type": "string" },
+                                    },
+                                    "required": ["name", "address", "description"],
+                                    "additionalProperties": False
+                                }
+                            }
+                        },
+                        "required": ["day","places"],
+                        "additionalProperties": False                       
+                    }              
+                }
+            },
+            "required": ["days"],
+            "additionalProperties": False
+        },
+        "strict": True,
+    }
+}
 
 app = FastAPI()
 
@@ -38,12 +80,35 @@ llm = ChatOpenAI(
     max_tokens=1500,
     timeout=None,
     max_retries=2,
-    api_key=os.getenv("OPENAI_API_KEY")
+    api_key=os.getenv("OPENAI_API_KEY"),
+    response_format=responseFormat
 )
 
 
 ## Put in options for adults and kids
 ## Implement different budget options, don't have to ask for budget
+
+systemPromptShort = (
+    f"You are a travel agent. Your job is to generate a complete itinerary based on the user’s input. "
+    f"Your goal is to gather the following information from the user:\n"
+    f"- **Trip duration** (phrased as 'X days', 'X-day trip', 'a week', or 'from date A to date B').\n"
+    f"- **Trip origin** (phrased as 'from X', 'starting in X', or 'origin is X').\n"
+    f"- **Trip destination** (phrased as 'to X', 'destination is X', or 'visit X').\n"
+    f"- **Number of travellers** (phrased as 'for X people', 'with X people', 'X people going', 'alone', or 'solo').\n"
+    f"- **Trip budget** (phrased as '$X', 'a budget of X', or 'around X').\n\n"
+
+    f"### Duration Handling:\n"
+    f"**If the user specifies the duration in any form (e.g., 'X days', 'a week', or a range like 'from date A to date B'), assume the duration is complete and do not ask for it again.**\n\n"
+
+    f"### Origin Handling:\n"
+    f"**If the user specifies the origin with phrases like 'from X', 'starting in X', or 'origin is X', assume the origin is complete and do not ask for it again.**\n\n"
+
+    f"### Destination Handling:\n"
+    f"**If the user specifies the destination with phrases like 'to X', 'destination is X', or 'visit X', assume the destination is complete and do not ask for it again.**\n\n"
+
+    f"### Number of Travellers Handling:\n"
+    f"**If the user specifies the number of travellers with phrases like 'for X people', 'with X people', 'X people going', 'alone', or 'solo', assume the number of travellers is complete and do not ask for it again. Interpret 'alone' or 'solo' as 1 traveller.**\n\n"
+)
 
 systemPrompt = (
     f"You are a travel agent. Your job is to generate a complete itinerary based on the user’s input. "
@@ -80,7 +145,7 @@ systemPrompt = (
     f"Once the user provides all five parameters (trip duration, origin, destination, number of travellers, and budget), you must generate the itinerary immediately without asking further questions or clarifying anything. "
     f"Do not delay generating the itinerary once all the information has been gathered. Generate the itinerary only when all information has been gathered.\n\n"
 
-    f"### Itinerary Format:\n"
+    """ f"### Itinerary Format:\n"
     f"1. Title it 'Your Itinerary'. **This is mandatory. Do not use this phrase elsewhere.**\n"
     f"2. Organize the itinerary by days. The first and last days are for travel:\n"
     f"   - First day: Travel from the origin to the destination.\n"
@@ -91,7 +156,7 @@ systemPrompt = (
     f"   - **Description:** [Provide a brief description]\n\n"
     f"4. **Ensure all addresses are precise and verifiable. For known locations like airports, use their official addresses.**\n\n"
 
-    f"After the itinerary, include a 'Budget Breakdown' section.\n\n"
+    f"After the itinerary, include a 'Budget Breakdown' section.\n\n" """
 
     f"Under no circumstances should you:\n"
     f"- Ask for additional information or preferences after all inputs are received.\n"
@@ -100,7 +165,7 @@ systemPrompt = (
     f"- Provide vague or imprecise addresses.\n"
 )
 
-systemMessage = SystemMessagePromptTemplate.from_template(systemPrompt)
+systemMessage = SystemMessagePromptTemplate.from_template(systemPromptShort)
 messageHistory = MessagesPlaceholder(variable_name="messages")
 messagesList = []
     
@@ -130,8 +195,9 @@ async def chatResponse(message: UserMessage):
                 "messages": messagesList
             }
         )
-
-        itineraryContent = response.content
+        print(f"Response: {response}")
+        itineraryContent = json.loads(response.content)
+        print(f"\nResponse Formatted: {response.content}")
 
         # Store response in message list
         messagesList.append(AIMessage(content=response.content))
@@ -139,7 +205,7 @@ async def chatResponse(message: UserMessage):
         # Check if the response contains the itinerary
         if "Your Itinerary" in itineraryContent:
             # Extract itinerary content from response
-            print(f"content {itineraryContent}")
+            #print(f"content {itineraryContent}")
 
             # Find all names in response
             namePattern = r"\*\*Name:\*\*\s(.*?)(?=\n)"
@@ -245,8 +311,8 @@ async def chatResponse(message: UserMessage):
             return JSONResponse(content=botResponse)
 
         # Return raw response 
-        botResponse = {"response": response.content}
-        return JSONResponse(content=botResponse)
+        botResponse = {"response": itineraryContent}
+        return JSONResponse(content=itineraryContent)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
