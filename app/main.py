@@ -195,30 +195,33 @@ async def chatResponse(message: UserMessage):
                 "messages": messagesList
             }
         )
-        print(f"Response: {response}")
-        itineraryContent = json.loads(response.content)
-        print(f"\nResponse Formatted: {response.content}")
+        
+        # Validate response
+        if not response.content or not response.content.strip():
+            return None, "Error: Empty or null JSON response."
+        try:
+            itineraryContent = json.loads(response.content)
+            print(f"\nResponse Formatted: {response.content}")
+            # Check for incomplete structure
+            for day in itineraryContent.get("days"):
+                if "day" not in day or "places" not in day or not isinstance(day["places"], list):
+                    return None, "Error: Missing or invalid structure in 'days' element."
+                else:
+                    continue
 
-        # Store response in message list
-        messagesList.append(AIMessage(content=response.content))
-
-        # Check if the response contains the itinerary
-        if "Your Itinerary" in itineraryContent:
-            # Extract itinerary content from response
-            #print(f"content {itineraryContent}")
-
-            # Find all names in response
-            namePattern = r"\*\*Name:\*\*\s(.*?)(?=\n)"
-            names: list[str] = re.findall(namePattern, itineraryContent)
-
-            # Find all addresses in response
-            addressPattern = r"\*\*Address:\*\*\s(.*?)(?=\n)"
-            addresses: list[str] = re.findall(addressPattern, itineraryContent)
+            # Store response in message list
+            messagesList.append(AIMessage(content=response.content))
+            
+            names = []
+            addresses = []
+            for day in itineraryContent["days"]:
+                for place in day["places"]:
+                    names.append(place["name"])
+                    addresses.append(place["address"])
 
             # Get coordinates and googlePlaceId of addresses
             placesInfo = await getAllPlaceDetails(names, addresses)
 
-            # Places
             places = []
 
             # Assign attributes to each place
@@ -235,13 +238,14 @@ async def chatResponse(message: UserMessage):
                 }
                 checkIfAirport(place)
                 places.append(place)
-
+            
+            # TODO: # Create new keys in itinerary for place details
             # Prepare response data
             responseData = {
                 "itinerary": itineraryContent,
                 "places": places
             }
-
+            # TODO: # Organize routes by day
             routes = []
 
             if len(places) >= 2:
@@ -308,15 +312,13 @@ async def chatResponse(message: UserMessage):
             #print(responseData)
             # Return formatted response
             botResponse = {"response": responseData}
-            return JSONResponse(content=botResponse)
+            return JSONResponse(content=botResponse)        
 
-        # Return raw response 
-        botResponse = {"response": itineraryContent}
-        return JSONResponse(content=itineraryContent)
-
+        except json.JSONDecodeError as e:
+            return None, f"Error: Failed to decode JSON. {str(e)}"
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+    
 # Get place type and details from Google Text Search API
 async def getPlaceDetailsFromText(client, textQuery):
     googleAPIKey = os.getenv("GOOGLE_API_KEY")
