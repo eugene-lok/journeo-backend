@@ -88,6 +88,8 @@ def mergeEntities(previous: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, An
 
 def extractEntities(state: TravelPreferenceState, config):
     """Extract entities from user input and handle clarification if needed."""
+    print("\n=== Starting Entity Extraction ===")
+    
     # Initialize LLM
     llm = ChatOpenAI(
         model="gpt-4o-mini",
@@ -102,39 +104,40 @@ def extractEntities(state: TravelPreferenceState, config):
     userInput = state['userInput']
     previousEntities = state.get('previousEntities', {}) or {}
     
+    print("User Input:", userInput)
+    print("Previous Entities:", json.dumps(previousEntities, indent=2))
+    
     # Format previous entities for the prompt
     previousEntitiesStr = json.dumps(previousEntities, indent=2) if previousEntities else "No previous entities"
-    
-    # Prepare prompt
-    prompt = ENTITY_EXTRACTION_PROMPT.format(
-        userInput=userInput,
-        previousEntities=previousEntitiesStr
-    )
     
     try:
         # Get LLM response
         response = llm.invoke(prompt)
-        print("Raw LLM Response:", response.content)
+        print("\nRaw LLM Response:", response.content)
         
         # Clean and parse JSON response
         cleanedResponse = cleanJsonResponse(response.content)
-        print("Cleaned Response:", cleanedResponse)
+        print("\nCleaned Response:", cleanedResponse)
         
         responseData = json.loads(cleanedResponse)
         newEntities = responseData['entities']
         clarificationMessage = responseData['clarificationMessage']
-        print("Parsed new entities:", newEntities)
+        print("\nNew Entities:", json.dumps(newEntities, indent=2))
         
         # Merge with previous entities
         extractedEntities = mergeEntities(previousEntities, newEntities)
-        print("Merged entities:", extractedEntities)
+        print("\nMerged Entities:", json.dumps(extractedEntities, indent=2))
         
-        # Determine missing entities
-        missingEntities = [
-            key for key, value in extractedEntities.items() 
-            if isEmptyValue(value)
-        ]
-        print("Missing entities:", missingEntities)
+        # Determine missing entities - with explicit value checking
+        missingEntities = []
+        for key, value in extractedEntities.items():
+            if isEmptyValue(value):
+                missingEntities.append(key)
+                print(f"Entity '{key}' is missing with value: {value}")
+        
+        print("\nMissing Entities:", missingEntities)
+        print("Clarification Message:", clarificationMessage)
+        print("\nIs Complete:", len(missingEntities) == 0)
         
         return {
             'userInput': userInput,
@@ -145,10 +148,12 @@ def extractEntities(state: TravelPreferenceState, config):
             'isComplete': len(missingEntities) == 0
         }
     except Exception as e:
-        print(f"Error in extractEntities: {str(e)}")
+        print(f"\nError in extractEntities: {str(e)}")
         
         # Fallback if parsing fails
         missingEntities = list(ENTITY_DESCRIPTIONS.keys())
+        print("Falling back to default missing entities:", missingEntities)
+        
         return {
             'userInput': userInput,
             'previousEntities': previousEntities,
@@ -157,6 +162,7 @@ def extractEntities(state: TravelPreferenceState, config):
             'clarificationMessage': "I had trouble understanding that. Could you please provide some details about your trip?",
             'isComplete': False
         }
+
 
 def createTravelPreferenceWorkflow():
     """Create LangGraph workflow for travel preference extraction."""
