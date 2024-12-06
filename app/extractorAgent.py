@@ -69,22 +69,31 @@ def cleanJsonResponse(responseText: str) -> str:
     cleaned = responseText.replace('```json', '').replace('```', '')
     return cleaned.strip()
 
+def mergeEntities(previous: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge previous entities with newly extracted ones, preferring new values."""
+    merged = {}
+    # Include all keys from ENTITY_DESCRIPTIONS to ensure complete coverage
+    for key in ENTITY_DESCRIPTIONS.keys():
+        # Get value from new entities if it exists and isn't empty, otherwise from previous
+        new_value = new.get(key)
+        if not isEmptyValue(new_value):
+            merged[key] = new_value
+        else:
+            prev_value = previous.get(key)
+            if not isEmptyValue(prev_value):
+                merged[key] = prev_value
+            else:
+                merged[key] = None
+    return merged
+
 def isEmptyValue(value: Any) -> bool:
     """Check if a value should be considered empty/missing."""
     if value is None:
         return True
     if isinstance(value, str):
         cleaned = value.lower().strip()
-        return cleaned == "" or cleaned == "null"
+        return cleaned == "" or cleaned == "null" or cleaned == "none"
     return False
-
-def mergeEntities(previous: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge previous entities with newly extracted ones, preferring new values."""
-    merged = previous.copy()
-    for key, value in new.items():
-        if value is not None:
-            merged[key] = value
-    return merged
 
 def extractEntities(state: TravelPreferenceState, config):
     """Extract entities from user input and handle clarification if needed."""
@@ -114,11 +123,10 @@ def extractEntities(state: TravelPreferenceState, config):
     try:
         # Get LLM response
         response = llm.invoke(prompt)
-        print("Raw LLM Response:", response.content)
         
         # Clean and parse JSON response
         cleanedResponse = cleanJsonResponse(response.content)
-        print("Cleaned Response:", cleanedResponse)
+        print("Response:", cleanedResponse)
         
         responseData = json.loads(cleanedResponse)
         newEntities = responseData['entities']
@@ -131,8 +139,8 @@ def extractEntities(state: TravelPreferenceState, config):
         
         # Determine missing entities
         missingEntities = [
-            key for key, value in extractedEntities.items() 
-            if isEmptyValue(value)
+            key for key in ENTITY_DESCRIPTIONS.keys()
+            if isEmptyValue(extractedEntities.get(key))
         ]
         print("Missing entities:", missingEntities)
         
@@ -146,14 +154,11 @@ def extractEntities(state: TravelPreferenceState, config):
         }
     except Exception as e:
         print(f"Error in extractEntities: {str(e)}")
-        
-        # Fallback if parsing fails
-        missingEntities = list(ENTITY_DESCRIPTIONS.keys())
         return {
             'userInput': userInput,
             'previousEntities': previousEntities,
             'extractedEntities': previousEntities,
-            'missingEntities': missingEntities,
+            'missingEntities': list(ENTITY_DESCRIPTIONS.keys()),
             'clarificationMessage': "I had trouble understanding that. Could you please provide some details about your trip?",
             'isComplete': False
         }
