@@ -102,48 +102,6 @@ def cleanupExpiredSessions(expiration_minutes: int = 30):
     for sessionId in expired_sessions:
         del sessionStorage[sessionId]
 
-llm = ChatOpenAI(
-    model="gpt-4o-mini",
-    temperature=0.7,
-    max_tokens=1500,
-    timeout=None,
-    max_retries=2,
-    api_key=os.getenv("OPENAI_API_KEY"),
-    response_format=responseFormat
-)
-
-
-## Put in options for adults and kids
-## Implement different budget options, don't have to ask for budget
-
-systemPromptShort = (
-    f"You are a travel agent. Your job is to generate a complete itinerary based on the user’s input. "
-    f"Your goal is to gather the following information from the user:\n"
-    f"- **Trip duration** (phrased as 'X days', 'X-day trip', 'a week', or 'from date A to date B').\n"
-    f"- **Trip origin** (phrased as 'from X', 'starting in X', or 'origin is X').\n"
-    f"- **Trip destination** (phrased as 'to X', 'destination is X', or 'visit X').\n"
-    f"- **Number of travellers** (phrased as 'for X people', 'with X people', 'X people going', 'alone', or 'solo').\n"
-    f"- **Trip budget** (phrased as '$X', 'a budget of X', or 'around X').\n\n"
-
-    f"### Duration Handling:\n"
-    f"**If the user specifies the duration in any form (e.g., 'X days', 'a week', or a range like 'from date A to date B'), assume the duration is complete and do not ask for it again.**\n\n"
-
-    f"### Origin Handling:\n"
-    f"**If the user specifies the origin with phrases like 'from X', 'starting in X', or 'origin is X', assume the origin is complete and do not ask for it again.**\n\n"
-
-    f"### Destination Handling:\n"
-    f"**If the user specifies the destination with phrases like 'to X', 'destination is X', or 'visit X', assume the destination is complete and do not ask for it again.**\n\n"
-
-    f"### Number of Travellers Handling:\n"
-    f"**If the user specifies the number of travellers with phrases like 'for X people', 'with X people', 'X people going', 'alone', or 'solo', assume the number of travellers is complete and do not ask for it again. Interpret 'alone' or 'solo' as 1 traveller.**\n\n"
-)
-
-systemMessage = SystemMessagePromptTemplate.from_template(systemPromptShort)
-messageHistory = MessagesPlaceholder(variable_name="messages")
-messagesList = []
-class UserInputModel(BaseModel):
-    user_input: str
-
 workflow = createTravelPreferenceWorkflow()   
 
 @app.post("/api/extract-preferences/")
@@ -185,6 +143,44 @@ async def extract_travel_preferences(input_data: UserInputModel):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    temperature=0.7,
+    max_tokens=1500,
+    timeout=None,
+    max_retries=2,
+    api_key=os.getenv("OPENAI_API_KEY"),
+    response_format=responseFormat
+)
+
+## Implement different budget options, don't have to ask for budget
+
+systemPromptShort = (
+    f"You are a travel agent. Your job is to generate a complete itinerary based on the user’s input. "
+    f"Your goal is to gather the following information from the user:\n"
+    f"- **Trip duration** (phrased as 'X days', 'X-day trip', 'a week', or 'from date A to date B').\n"
+    f"- **Trip origin** (phrased as 'from X', 'starting in X', or 'origin is X').\n"
+    f"- **Trip destination** (phrased as 'to X', 'destination is X', or 'visit X').\n"
+    f"- **Number of travellers** (phrased as 'for X people', 'with X people', 'X people going', 'alone', or 'solo').\n"
+    f"- **Trip budget** (phrased as '$X', 'a budget of X', or 'around X').\n\n"
+
+    f"### Duration Handling:\n"
+    f"**If the user specifies the duration in any form (e.g., 'X days', 'a week', or a range like 'from date A to date B'), assume the duration is complete and do not ask for it again.**\n\n"
+
+    f"### Origin Handling:\n"
+    f"**If the user specifies the origin with phrases like 'from X', 'starting in X', or 'origin is X', assume the origin is complete and do not ask for it again.**\n\n"
+
+    f"### Destination Handling:\n"
+    f"**If the user specifies the destination with phrases like 'to X', 'destination is X', or 'visit X', assume the destination is complete and do not ask for it again.**\n\n"
+
+    f"### Number of Travellers Handling:\n"
+    f"**If the user specifies the number of travellers with phrases like 'for X people', 'with X people', 'X people going', 'alone', or 'solo', assume the number of travellers is complete and do not ask for it again. Interpret 'alone' or 'solo' as 1 traveller.**\n\n"
+)
+
+systemMessage = SystemMessagePromptTemplate.from_template(systemPromptShort)
+messageHistory = MessagesPlaceholder(variable_name="messages")
+messagesList = []    
 
 @app.post("/api/chat/")
 async def chatResponse(message: UserMessage):
