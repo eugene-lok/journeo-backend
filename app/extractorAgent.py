@@ -13,11 +13,11 @@ class TravelPreferenceState(TypedDict):
     userInput: str
     previousEntities: Optional[Dict[str, Any]]
     extractedEntities: Dict[str, Any]
-    missing_entities: List[str]
+    missingEntities: List[str]
     clarificationMessage: str
-    IsComplete: bool
+    isComplete: bool
 
-# Entity descriptions for generating clarification messages
+# Entity descriptions for clarification messages
 ENTITY_DESCRIPTIONS = {
     'destinations': 'Where would you like to travel?',
     'budget': 'What is your budget for this trip?',
@@ -46,53 +46,47 @@ ENTITY_EXTRACTION_PROMPT = PromptTemplate(
     - Traveling with Children
     - Traveling with Pets
 
-    Reply with a JSON object with the following format:
+    Reply with a JSON object with both entities and a natural follow-up message:
     {{
-        "destinations": "extracted destination or null",
-        "budget": "extracted budget or null",
-        "duration": "extracted duration or null",
-        "numTravellers": "extracted number or null",
-        "startDate": "extracted date or null",
-        "includesChildren": "true/false or null",
-        "includesPets": "true/false or null"
+        "entities": {{
+            "destinations": "extracted destination or null",
+            "budget": "extracted budget or null",
+            "duration": "extracted duration or null",
+            "numTravellers": "extracted number or null",
+            "startDate": "extracted date or null",
+            "includesChildren": "true/false or null",
+            "includesPets": "true/false or null"
+        }},
+        "clarificationMessage": "If there are no missing entities left, provide a natural, conversational follow-up question asking about missing information. Be concise but friendly. If all entities are fulfilled, return an empty string "
     }}
 
     Focus on extracting new information from: "{userInput}"
     """
 )
 
-def generateclarificationMessage(missing_entities: List[str]) -> str:
-    """Generate a human-readable clarification message."""
-    questions = [ENTITY_DESCRIPTIONS.get(entity, entity) for entity in missing_entities]
-    return f"I need a bit more information. Could you please provide details about: {', '.join(questions)}?"
-
-def merge_entities(previous: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge previous entities with newly extracted ones, preferring new values when available."""
-    merged = previous.copy()
-    for key, value in new.items():
-        if value is not None:  # Only update if new value is not None
-            merged[key] = value
-    return merged
-
-def clean_json_response(response_text: str) -> str:
+def cleanJsonResponse(responseText: str) -> str:
     """Clean the LLM response by removing markdown code block markers."""
-    # Remove ```json and ``` markers
-    cleaned = response_text.replace('```json', '').replace('```', '')
-    # Strip whitespace
-    cleaned = cleaned.strip()
-    return cleaned
+    cleaned = responseText.replace('```json', '').replace('```', '')
+    return cleaned.strip()
 
-def is_empty_value(value: Any) -> bool:
+def isEmptyValue(value: Any) -> bool:
     """Check if a value should be considered empty/missing."""
     if value is None:
         return True
     if isinstance(value, str):
-        # Check for empty string, "null", or just whitespace
         cleaned = value.lower().strip()
         return cleaned == "" or cleaned == "null"
     return False
 
-def extract_entities(state: TravelPreferenceState, config):
+def mergeEntities(previous: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge previous entities with newly extracted ones, preferring new values."""
+    merged = previous.copy()
+    for key, value in new.items():
+        if value is not None:
+            merged[key] = value
+    return merged
+
+def extractEntities(state: TravelPreferenceState, config):
     """Extract entities from user input and handle clarification if needed."""
     # Initialize LLM
     llm = ChatOpenAI(
@@ -109,112 +103,95 @@ def extract_entities(state: TravelPreferenceState, config):
     previousEntities = state.get('previousEntities', {}) or {}
     
     # Format previous entities for the prompt
-    previousEntities_str = json.dumps(previousEntities, indent=2) if previousEntities else "No previous entities"
+    previousEntitiesStr = json.dumps(previousEntities, indent=2) if previousEntities else "No previous entities"
     
     # Prepare prompt
     prompt = ENTITY_EXTRACTION_PROMPT.format(
         userInput=userInput,
-        previousEntities=previousEntities_str
+        previousEntities=previousEntitiesStr
     )
     
     try:
         # Get LLM response
         response = llm.invoke(prompt)
-        
-        # Debug print
         print("Raw LLM Response:", response.content)
         
         # Clean and parse JSON response
-        cleaned_response = clean_json_response(response.content)
-        print("Cleaned Response:", cleaned_response)
+        cleanedResponse = cleanJsonResponse(response.content)
+        print("Cleaned Response:", cleanedResponse)
         
-        new_entities = json.loads(cleaned_response)
-        print("Parsed new entities:", new_entities)
+        responseData = json.loads(cleanedResponse)
+        newEntities = responseData['entities']
+        clarificationMessage = responseData['clarificationMessage']
+        print("Parsed new entities:", newEntities)
         
         # Merge with previous entities
-        extractedEntities = merge_entities(previousEntities, new_entities)
+        extractedEntities = mergeEntities(previousEntities, newEntities)
         print("Merged entities:", extractedEntities)
         
-        # Determine missing entities using the new checker
-        missing_entities = [
+        # Determine missing entities
+        missingEntities = [
             key for key, value in extractedEntities.items() 
-            if is_empty_value(value)
+            if isEmptyValue(value)
         ]
-        print("Missing entities:", missing_entities)
-        
-        # Generate clarification message if needed
-        clarificationMessage = generateclarificationMessage(missing_entities) if missing_entities else ""
+        print("Missing entities:", missingEntities)
         
         return {
             'userInput': userInput,
             'previousEntities': previousEntities,
             'extractedEntities': extractedEntities,
-            'missing_entities': missing_entities,
+            'missingEntities': missingEntities,
             'clarificationMessage': clarificationMessage,
-            'IsComplete': len(missing_entities) == 0
+            'isComplete': len(missingEntities) == 0
         }
     except Exception as e:
-        # Print error for debugging
-        print(f"Error in extract_entities: {str(e)}")
+        print(f"Error in extractEntities: {str(e)}")
         
         # Fallback if parsing fails
-        missing_entities = list(ENTITY_DESCRIPTIONS.keys())
+        missingEntities = list(ENTITY_DESCRIPTIONS.keys())
         return {
             'userInput': userInput,
             'previousEntities': previousEntities,
             'extractedEntities': previousEntities,
-            'missing_entities': missing_entities,
-            'clarificationMessage': generateclarificationMessage(missing_entities),
-            'IsComplete': False
+            'missingEntities': missingEntities,
+            'clarificationMessage': "I had trouble understanding that. Could you please provide some details about your trip?",
+            'isComplete': False
         }
 
-def create_travel_preference_workflow():
+def createTravelPreferenceWorkflow():
     """Create LangGraph workflow for travel preference extraction."""
     workflow = StateGraph(TravelPreferenceState)
-    
-    # Extraction node
-    workflow.add_node("extract", extract_entities)
-    
-    # Entry point
+    workflow.add_node("extract", extractEntities)
     workflow.set_entry_point("extract")
-    
-    # Add both conditional end nodes from extract
     workflow.add_conditional_edges(
         "extract",
-        # Condition function determines which edge to take
-        lambda state: "complete" if state['IsComplete'] else "incomplete",
+        lambda state: "complete" if state['isComplete'] else "incomplete",
         {
-            # If complete, go to END
             "complete": END,
-            # If incomplete, go to END with clarification
             "incomplete": END
         }
     )
-    
     return workflow.compile(checkpointer=MemorySaver())
 
 def main():
-
-    app = create_travel_preference_workflow()
-    
-    # Config 
+    app = createTravelPreferenceWorkflow()
     config = {"configurable": {"thread_id": "1"}}
     
-    # Test
-    initial_input = {
+    # First invocation
+    initialInput = {
         'userInput': 'I want to visit Paris for a week',
         'previousEntities': None
     }
-    result1 = app.invoke(initial_input, config=config)
+    result1 = app.invoke(initialInput, config=config)
     print("\nFirst invocation result:")
     print(json.dumps(result1, indent=2))
     
     # Second invocation with previous entities
-    second_input = {
-        'userInput': 'I will be traveling with my wife and two kids',
+    secondInput = {
+        'userInput': 'I will be traveling with my wife and two kids on June 20. We are planning to spend $5000. I have no pets.',
         'previousEntities': result1['extractedEntities']
     }
-    result2 = app.invoke(second_input, config=config)
+    result2 = app.invoke(secondInput, config=config)
     print("\nSecond invocation result:")
     print(json.dumps(result2, indent=2))
 
