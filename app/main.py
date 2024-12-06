@@ -14,7 +14,7 @@ from langchain.schema import AIMessage, HumanMessage, SystemMessage
 from app.mapboxRoutes import getRouteFromMapbox
 from app.loggerConfig import logger
 from app.geoTools.geocoding import *
-from app.extractorAgent import create_travel_preference_workflow
+from app.extractorAgent import createTravelPreferenceWorkflow
 #from app.auth import authRouter
 import os
 import re
@@ -118,17 +118,19 @@ messagesList = []
 class UserInputModel(BaseModel):
     user_input: str
 
-workflow = create_travel_preference_workflow()    
+workflow = createTravelPreferenceWorkflow()   
 
-@app.post("/api/extract-preferences")
+@app.post("/api/extract-preferences/")
 async def extract_travel_preferences(input_data: UserInputModel):
+    print(input_data)
     try:
         # Configuration for the workflow
         config = {"configurable": {"thread_id": "preference_extraction"}}
         
         # Prepare initial input
         initial_input = {
-            'user_input': input_data.user_input
+            'userInput': input_data.user_input,
+            'previousEntities': None
         }
         
         print(f"userInput: {initial_input}")
@@ -137,10 +139,12 @@ async def extract_travel_preferences(input_data: UserInputModel):
         
         # Return the extracted entities and missing entities
         return {
-            "extracted_entities": result.get('extracted_entities', {}),
-            "missing_entities": result.get('missing_entities', []),
-            "is_complete": result.get('is_complete', False)
+            "extracted_entities": result.get('extractedEntities', {}),
+            "missing_entities": result.get('missingEntities', []),
+            "is_complete": result.get('isComplete', False),
+            "clarificationMessage": result.get('clarificationMessage', "")
         }
+    
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
