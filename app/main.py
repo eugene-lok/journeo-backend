@@ -88,7 +88,19 @@ class SessionData:
 
 class UserInputModel(BaseModel):
     user_input: str
-    session_id: Optional[str] = None
+    sessionId: Optional[str] = None
+
+sessionStorage: Dict[str, SessionData] = {}
+
+# Session cleanup function
+def cleanupExpiredSessions(expiration_minutes: int = 30):
+    current_time = datetime.now()
+    expired_sessions = [
+        sessionId for sessionId, sessionData in sessionStorage.items()
+        if (current_time - sessionData.last_accessed) > timedelta(minutes=expiration_minutes)
+    ]
+    for sessionId in expired_sessions:
+        del sessionStorage[sessionId]
 
 llm = ChatOpenAI(
     model="gpt-4o-mini",
@@ -136,29 +148,41 @@ workflow = createTravelPreferenceWorkflow()
 
 @app.post("/api/extract-preferences/")
 async def extract_travel_preferences(input_data: UserInputModel):
-    print(input_data)
     try:
-        # Configuration for the workflow
-        config = {"configurable": {"thread_id": "preference_extraction"}}
+        # Clean up expired sessions first
+        cleanupExpiredSessions()
+
+        # Get or create session ID
+        sessionId = input_data.sessionId
+        if not sessionId or sessionId not in sessionStorage:
+            sessionId = str(uuid.uuid4())
+            sessionStorage[sessionId] = SessionData(entities={})
         
-        # Prepare initial input
+        # Update last accessed time
+        sessionStorage[sessionId].last_accessed = datetime.now()
+        
+        # Get previous entities for this specific session
+        previous_entities = sessionStorage[sessionId].entities
+        
+        config = {"configurable": {"thread_id": f"pref_{sessionId}"}}
+        
         initial_input = {
             'userInput': input_data.user_input,
-            'previousEntities': None
+            'previousEntities': previous_entities
         }
         
-        print(f"userInput: {initial_input}")
-        # Run the workflow
         result = workflow.invoke(initial_input, config=config)
         
-        # Return the extracted entities and missing entities
+        # Update session storage with new entities
+        sessionStorage[sessionId].entities = result.get('extractedEntities', {})
+        
         return {
+            "sessionId": sessionId,
             "extracted_entities": result.get('extractedEntities', {}),
             "missing_entities": result.get('missingEntities', []),
             "is_complete": result.get('isComplete', False),
             "clarificationMessage": result.get('clarificationMessage', "")
         }
-    
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
