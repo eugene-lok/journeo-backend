@@ -1,4 +1,3 @@
-from openai import OpenAI
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from app.models import UserItinerary, UserMessage
@@ -10,16 +9,18 @@ from langchain.prompts import (
     SystemMessagePromptTemplate,
     MessagesPlaceholder
 )
+from pydantic import BaseModel
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
 from app.mapboxRoutes import getRouteFromMapbox
 from app.loggerConfig import logger
-from app.geoTools.geocoding import getAllPlaceDetails, getCoordinatesGoogle, getPlaceDetailsFromId, getPlaceFromAutocomplete, checkIfAirport
 from app.geoTools.geocoding import *
+from app.extractorAgent import create_travel_preference_workflow
 #from app.auth import authRouter
 import os
 import re
 import httpx
 import asyncio
+import json
 
 # Configure logging
 #logging.basicConfig(level=logging.INFO)
@@ -28,6 +29,45 @@ import asyncio
 
 
 responseFormat = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "itinerary",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "day": {"type": "integer"},
+                            "places": {
+                                "type": "array",
+                                "items": {  
+                                    "type": "object",
+                                    "properties": {
+                                        "name": { "type": "string" },
+                                        "address": { "type": "string" },
+                                        "description": { "type": "string" },
+                                    },
+                                    "required": ["name", "address", "description"],
+                                    "additionalProperties": False
+                                }
+                            },
+                            "summaryOfDay": {"type": "string"}
+                        },
+                        "required": ["day","places","summaryOfDay"],
+                        "additionalProperties": False                       
+                    }              
+                }
+            },
+            "required": ["days"],
+            "additionalProperties": False
+        },
+        "strict": True,
+    }
+}
+
 app = FastAPI()
 
 # Apply CORS middleware
@@ -42,7 +82,8 @@ llm = ChatOpenAI(
     max_tokens=1500,
     timeout=None,
     max_retries=2,
-    api_key=os.getenv("OPENAI_API_KEY")
+    api_key=os.getenv("OPENAI_API_KEY"),
+    response_format=responseFormat
 )
 
 
@@ -69,26 +110,26 @@ systemPromptShort = (
 
     f"### Number of Travellers Handling:\n"
     f"**If the user specifies the number of travellers with phrases like 'for X people', 'with X people', 'X people going', 'alone', or 'solo', assume the number of travellers is complete and do not ask for it again. Interpret 'alone' or 'solo' as 1 traveller.**\n\n"
-    f"2. Organize the itinerary by days. The first and last days are for travel:\n"
-    f"   - First day: Travel from the origin to the destination.\n"
-    f"   - Last day: Travel back from the destination to the origin.\n"
-    f"3. For each location you suggest, use the following mandatory format. Recommend at least 2 locations per day unless the single location will take a full day to visit:\n"
-    f"   - **Name:** [Always start with this.]\n"
-    f"4. **Ensure all addresses are precise and verifiable. For known locations like airports, use their official addresses.**\n\n"
-
-    f"After the itinerary, include a 'Budget Breakdown' section.\n\n"
-
-    f"Under no circumstances should you:\n"
-    f"- Ask for additional information or preferences after all inputs are received.\n"
-    f"- Delay generating the itinerary.\n"
-    f"- Use placeholder text for addresses.\n"
-    f"- Provide vague or imprecise addresses.\n"
 )
 
-systemMessage = SystemMessagePromptTemplate.from_template(systemPrompt)
+systemMessage = SystemMessagePromptTemplate.from_template(systemPromptShort)
 messageHistory = MessagesPlaceholder(variable_name="messages")
 messagesList = []
-    
+class UserInputModel(BaseModel):
+    user_input: str
+
+workflow = create_travel_preference_workflow()    
+
+@app.post("/api/extract-preferences")
+async def extract_travel_preferences(input_data: UserInputModel):
+    try:
+        # Configuration for the workflow
+        config = {"configurable": {"thread_id": "preference_extraction"}}
+        
+        # Prepare initial input
+        initial_input = {
+            'user_input': input_data.user_input
+        }
         
         print(f"userInput: {initial_input}")
         # Run the workflow
@@ -129,29 +170,33 @@ async def chatResponse(message: UserMessage):
                 "messages": messagesList
             }
         )
+        
+        # Validate response
+        if not response.content or not response.content.strip():
+            return None, "Error: Empty or null JSON response."
+        try:
+            itineraryContent = json.loads(response.content)
+            print(f"\nResponse Formatted: {response.content}")
+            # Check for incomplete structure
+            for day in itineraryContent.get("days"):
+                if "day" not in day or "places" not in day or not isinstance(day["places"], list):
+                    return None, "Error: Missing or invalid structure in 'days' element."
+                else:
+                    continue
 
-        itineraryContent = response.content
-
-        # Store response in message list
-        messagesList.append(AIMessage(content=response.content))
-
-        # Check if the response contains the itinerary
-        if "Your Itinerary" in itineraryContent:
-            # Extract itinerary content from response
-            print(f"content {itineraryContent}")
-
-            # Find all names in response
-            namePattern = r"\*\*Name:\*\*\s(.*?)(?=\n)"
-            names: list[str] = re.findall(namePattern, itineraryContent)
-
-            # Find all addresses in response
-            addressPattern = r"\*\*Address:\*\*\s(.*?)(?=\n)"
-            addresses: list[str] = re.findall(addressPattern, itineraryContent)
+            # Store response in message list
+            messagesList.append(AIMessage(content=response.content))
+            
+            names = []
+            addresses = []
+            for day in itineraryContent["days"]:
+                for place in day["places"]:
+                    names.append(place["name"])
+                    addresses.append(place["address"])
 
             # Get coordinates and googlePlaceId of addresses
             placesInfo = await getAllPlaceDetails(names, addresses)
 
-            # Places
             places = []
 
             # Assign attributes to each place
@@ -168,13 +213,14 @@ async def chatResponse(message: UserMessage):
                 }
                 checkIfAirport(place)
                 places.append(place)
-
+            
+            # TODO: # Create new keys in itinerary for place details
             # Prepare response data
             responseData = {
                 "itinerary": itineraryContent,
                 "places": places
             }
-
+            # TODO: # Organize routes by day
             routes = []
 
             if len(places) >= 2:
@@ -241,15 +287,13 @@ async def chatResponse(message: UserMessage):
             #print(responseData)
             # Return formatted response
             botResponse = {"response": responseData}
-            return JSONResponse(content=botResponse)
+            return JSONResponse(content=botResponse)        
 
-        # Return raw response 
-        botResponse = {"response": response.content}
-        return JSONResponse(content=botResponse)
-
+        except json.JSONDecodeError as e:
+            return None, f"Error: Failed to decode JSON. {str(e)}"
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+    
 # Get place type and details from Google Text Search API
 async def getPlaceDetailsFromText(client, textQuery):
     googleAPIKey = os.getenv("GOOGLE_API_KEY")

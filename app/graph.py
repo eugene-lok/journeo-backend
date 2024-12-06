@@ -18,4 +18,6 @@ llm = ChatOpenAI(
     api_key=os.getenv("OPENAI_API_KEY")
 )
 
+
+
 llm.invoke("Hello, world!")
