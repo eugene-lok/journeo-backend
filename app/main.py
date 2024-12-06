@@ -21,6 +21,9 @@ import re
 import httpx
 import asyncio
 import json
+import uuid
+from datetime import datetime, timedelta
+from typing import Dict, Any, Optional
 
 # Configure logging
 #logging.basicConfig(level=logging.INFO)
@@ -75,6 +78,17 @@ addCorsMiddleware(app)
 
 # Add router
 #app.include_router(authRouter)
+
+# Session storage 
+class SessionData:
+    def __init__(self, entities: Dict[str, Any]):
+        self.entities = entities
+        self.last_accessed = datetime.now()
+        self.created_at = datetime.now()
+
+class UserInputModel(BaseModel):
+    user_input: str
+    session_id: Optional[str] = None
 
 llm = ChatOpenAI(
     model="gpt-4o-mini",
