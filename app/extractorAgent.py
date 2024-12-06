@@ -32,12 +32,22 @@ ENTITY_DESCRIPTIONS = {
 ENTITY_EXTRACTION_PROMPT = PromptTemplate(
     input_variables=["userInput", "previousEntities"],
     template="""
-    Extract travel preference entities from the user's latest input. Some entities may have been previously provided.
+    Your task is to maintain and update travel preference information, considering both previous and new information.
 
-    Previously extracted entities:
+    CURRENT KNOWN INFORMATION:
     {previousEntities}
 
-    Extract or update the following entities from the new input:
+    NEW USER INPUT TO PROCESS: "{userInput}"
+
+    INSTRUCTIONS:
+    1. Extract new entities from the user input
+    2. For any entity not mentioned in the new input, use null
+    3. The final clarification message should be based on what's missing after combining:
+       - Previously known entities (above)
+       - Newly extracted entities (from current input)
+    4. Do not ask about information that exists in either previous OR new entities
+
+    Required entities:
     - Destinations (cities/countries/regions)
     - Budget
     - Trip Duration
@@ -46,7 +56,11 @@ ENTITY_EXTRACTION_PROMPT = PromptTemplate(
     - Traveling with Children
     - Traveling with Pets
 
-    Reply with a JSON object with both entities and a natural follow-up message:
+    Example Scenario:
+    If previous entities had "destinations": "London", and new input doesn't mention destinations,
+    do NOT ask about destinations in the clarification message since it's already known.
+
+    Reply with this JSON structure:
     {{
         "entities": {{
             "destinations": "extracted destination or null",
@@ -57,10 +71,8 @@ ENTITY_EXTRACTION_PROMPT = PromptTemplate(
             "includesChildren": "true/false or null",
             "includesPets": "true/false or null"
         }},
-        "clarificationMessage": "If there are no missing entities left, provide a natural, conversational follow-up question asking about missing information. Be concise but friendly. If all entities are fulfilled, return an empty string "
+        "clarificationMessage": "Ask ONLY about truly missing information (not found in either previous OR new entities). If ALL entities are accounted for when combining previous and new, return an empty string."
     }}
-
-    Focus on extracting new information from: "{userInput}"
     """
 )
 
