@@ -247,6 +247,7 @@ systemPromptShort = (
     f"3. Every address MUST be an exact, real address. Do not use placeholders or approximate locations.\n\n"
     f"4. Activities and context should be included in the description field, NOT in the name field.\n"
     f"   Example description: 'Departing flight from this major international airport serving Calgary.'\n\n"
+    f" Use present tense when summarizing each day. Do not use future tense.\n"
     f"In your budgetBreakdown in your response, include a comprehensive description of how the budget is distributed throughout the trip."
 )
 
