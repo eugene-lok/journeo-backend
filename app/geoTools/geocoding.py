@@ -58,8 +58,6 @@ async def getAllPlaceDetails(names: list[str], addresses: list[str]):
                 "details": detailsResult
             }
             results.append(result)
-
-        print(f"geocoding results:\n{results}")
     return results
 
 
@@ -127,7 +125,6 @@ async def getPlaceFromAutocomplete(client, input, coordinates):
         }
 
         response = await client.post(autocompleteUrl, headers=headers, json=body)
-        print(f"Attempting input {input} with coordinates {coordinates['latitude']}, {coordinates['longitude']}, radius {radius}")
         if response.status_code == 200 and response.content:
             try:
                 data = response.json()
@@ -181,9 +178,6 @@ async def getPlaceFromAutocomplete(client, input, coordinates):
 # Get place details from Google Place Details API using Place ID
 async def getPlaceDetailsFromId(client, placeId):
     googleAPIKey = os.getenv("GOOGLE_API_KEY")
-    if not googleAPIKey:
-        logger.error("Google API key is not set in the environment variables.")
-        raise ValueError("Missing Google API key.")
     fields = "id,displayName,primaryType,primaryTypeDisplayName,types,websiteUri,googleMapsUri,internationalPhoneNumber,nationalPhoneNumber,containingPlaces,viewport"
     headers = {
         'Content-Type': 'application/json',
@@ -195,7 +189,7 @@ async def getPlaceDetailsFromId(client, placeId):
         response = await client.get(placeDetailsUrl, headers=headers)
         if response.status_code == 200:
             result = response.json()
-            print(f"RESPONSE:{result}")
+            #print(f"RESPONSE:{result}")
             if result is not None:
                 ## TODO: Use new fields 
                 return {
