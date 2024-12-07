@@ -1,7 +1,5 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import JSONResponse
-from app.models import UserItinerary, UserMessage
-from app.middleware import addCorsMiddleware
 from langchain_openai import ChatOpenAI
 from langchain.prompts import (
     ChatPromptTemplate,
@@ -9,21 +7,26 @@ from langchain.prompts import (
     SystemMessagePromptTemplate,
     MessagesPlaceholder
 )
-from pydantic import BaseModel
+
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
+from pydantic import BaseModel
+from datetime import datetime, timedelta
+from typing import Dict, Any, Optional, List, Union
+from functools import wraps
+
+from app.models import UserItinerary, UserMessage
+from app.middleware import addCorsMiddleware
 from app.mapboxRoutes import getRouteFromMapbox
 from app.loggerConfig import logger
 from app.geoTools.geocoding import *
 from app.extractorAgent import createTravelPreferenceWorkflow
-#from app.auth import authRouter
+
 import os
-import re
 import httpx
 import asyncio
 import json
 import uuid
-from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List
+
 
 # Configure logging
 #logging.basicConfig(level=logging.INFO)
@@ -34,60 +37,99 @@ app = FastAPI()
 # Apply CORS middleware
 addCorsMiddleware(app)
 
-# Session storage 
 class SessionData:
-    def __init__(self, entities: Dict[str, Any]):
-        self.entities = entities
+    def __init__(self):
         self.lastAccessed = datetime.now()
         self.createdAt = datetime.now()
+        self.preferences = {}  # For travel preferences
+        self.chatHistory = []  # For chat messages
+        self.entities = {}     # For extracted entities
 
-class UserInputModel(BaseModel):
-    userInput: str
+# Session manager class
+class SessionManager:
+    def __init__(self, expirationMinutes: int = 30):
+        self._sessions: Dict[str, SessionData] = {}
+        self.expirationMinutes = expirationMinutes
+
+    def createSession(self) -> str:
+        sessionId = str(uuid.uuid4())
+        self._sessions[sessionId] = SessionData()
+        return sessionId
+
+    def getSession(self, sessionId: str) -> Optional[SessionData]:
+        session = self._sessions.get(sessionId)
+        if session:
+            session.lastAccessed = datetime.now()
+        return session
+
+    def sessionExists(self, sessionId: str) -> bool:
+        return sessionId in self._sessions
+
+    def updateSession(self, sessionId: str, updateFunc) -> None:
+        """
+        Update session using a callback function
+        """
+        if session := self.getSession(sessionId):
+            updateFunc(session)
+
+    def cleanupExpiredSessions(self) -> None:
+        currentTime = datetime.now()
+        expired = [
+            sessionId for sessionId, data in self._sessions.items()
+            if (currentTime - data.lastAccessed) > timedelta(minutes=self.expirationMinutes)
+        ]
+        for sessionId in expired:
+            del self._sessions[sessionId]
+
+# Create global session manager
+sessionManager = SessionManager()
+
+# Base model for requests that include sessionId
+class SessionRequest(BaseModel):
     sessionId: Optional[str] = None
 
-sessionStorage: Dict[str, SessionData] = {}
+# Dependency for session management
+async def getOrCreateSession(sessionRequest: SessionRequest) -> tuple[str, SessionData]:
+    """
+    FastAPI dependency that either gets an existing session or creates a new one
+    """
+    sessionManager.cleanupExpiredSessions()
+    
+    sessionId = sessionRequest.sessionId
+    if not sessionId or not sessionManager.sessionExists(sessionId):
+        sessionId = sessionManager.createSession()
+    
+    session = sessionManager.getSession(sessionId)
+    if not session:
+        raise HTTPException(status_code=500, detail="Failed to create or retrieve session")
+    
+    return sessionId, session
 
-# Session cleanup function
-def cleanupExpiredSessions(expirationMinutes: int = 30):
-    currentTime = datetime.now()
-    expired_sessions = [
-        sessionId for sessionId, sessionData in sessionStorage.items()
-        if (currentTime - sessionData.lastAccessed) > timedelta(minutes=expirationMinutes)
-    ]
-    for sessionId in expired_sessions:
-        del sessionStorage[sessionId]
+# Updated request models
+class UserMessage(SessionRequest):
+    input: Union[str, Dict] 
+
+class UserInputModel(SessionRequest):
+    userInput: str
 
 workflow = createTravelPreferenceWorkflow()   
 
 @app.post("/api/extract-preferences/")
-async def extract_travel_preferences(inputData: UserInputModel):
+async def extractTravelPreferences(inputData: UserInputModel):
     try:
-        # Clean up expired sessions first
-        cleanupExpiredSessions()
-
-        # Get or create session ID
-        sessionId = inputData.sessionId
-        if not sessionId or sessionId not in sessionStorage:
-            sessionId = str(uuid.uuid4())
-            sessionStorage[sessionId] = SessionData(entities={})
-        
-        # Update last accessed time
-        sessionStorage[sessionId].lastAccessed = datetime.now()
-        
-        # Get previous entities for this specific session
-        previousEntities = sessionStorage[sessionId].entities
+        sessionId, session = await getOrCreateSession(inputData)  # Pass the inputData directly
         
         config = {"configurable": {"thread_id": f"pref_{sessionId}"}}
         
         initialInput = {
             'userInput': inputData.userInput,
-            'previousEntities': previousEntities
+            'previousEntities': session.entities
         }
         
         result = workflow.invoke(initialInput, config=config)
         
-        # Update session storage with new entities
-        sessionStorage[sessionId].entities = result.get('extractedEntities', {})
+        # Update session entities
+        session.entities = result.get('extractedEntities', {})
         
         return {
             "sessionId": sessionId,
@@ -161,6 +203,7 @@ systemPromptShort = (
     f"- **Trip destination** (phrased as 'to X', 'destination is X', or 'visit X').\n"
     f"- **Number of travellers** (phrased as 'for X people', 'with X people', 'X people going', 'alone', or 'solo').\n"
     f"- **Trip budget** (phrased as '$X', 'a budget of X', or 'around X').\n\n"
+    f"Every name you generate MUST be an exact, real name of a location. e.g. Don't name a location 'Departure from Location'.\n"
     f"Every address you generate MUST be an exact, real address. Don't use various places or a placeholder.\n"
     f"In your budgetBreakdown in your response, include a comprehensive description of how the budget is distributed throughout the trip."
 )
@@ -169,68 +212,86 @@ systemMessage = SystemMessagePromptTemplate.from_template(systemPromptShort)
 messageHistory = MessagesPlaceholder(variable_name="messages")
 messagesList = []    
 
-
 @app.post("/api/chat/")
-async def chat_response(
-    message: UserMessage,
-    session_info: tuple[str, SessionData] = Depends(get_session)
-):
+async def chatResponse(message: UserMessage):
     try:
-        session_id, session = session_info
+        print(f"Raw message received: {message}")
+        sessionId, session = await getOrCreateSession(message)
         
+        # Get stored entities from session
+        stored_entities = session.entities
+        print(f"Stored entities from session: {stored_entities}")
+
         # Prepare the chat prompt
-        human_message = HumanMessagePromptTemplate.from_template("{input}")
+        humanMessage = HumanMessagePromptTemplate.from_template("{input}")
         prompt = ChatPromptTemplate.from_messages([
             systemMessage,
-            human_message,
+            humanMessage,
             messageHistory
         ])
 
-        # Add human message and generate response
-        session.messages.append(HumanMessage(content=message.input))
+        # Use stored entities if available, otherwise use input
+        input_content = message.input
+        if isinstance(input_content, dict):
+            # Merge with stored entities to ensure we have complete data
+            entities = stored_entities if stored_entities else input_content
+            formatted_input = (
+                f"Please create an itinerary for {entities.get('duration', 'N/A')} "
+                f"in {entities.get('destinations', 'N/A')} "
+                f"for {entities.get('numTravellers', '1')} traveler(s) "
+                f"with a budget of {entities.get('budget', 'N/A')}. "
+                f"Start date: {entities.get('startDate', 'N/A')}. "
+                f"{'Includes children. ' if entities.get('includesChildren') == 'true' else ''}"
+                f"{'Includes pets. ' if entities.get('includesPets') == 'true' else ''}"
+            )
+            input_content = formatted_input
+
+        print(f"Formatted input for LLM: {input_content}")
+        
+        session.chatHistory.append(HumanMessage(content=str(input_content)))
+        
         chain = prompt | llm
         response = chain.invoke({
-            "input": message.input,
-            "messages": session.messages
+            "input": input_content,
+            "messages": session.chatHistory
         })
 
-        # Validate response
+
         if not response.content or not response.content.strip():
-            return None, "Error: Empty or null JSON response."
+            raise HTTPException(status_code=500, detail="Empty or null JSON response.")
 
         try:
-            itinerary_content = json.loads(response.content)
-            print(f"\nResponse Formatted: {response.content}")
+            itineraryContent = json.loads(response.content)
             
             # Validate itinerary structure
-            for day in itinerary_content.get("days"):
+            for day in itineraryContent.get("days", []):
                 if "day" not in day or "places" not in day or not isinstance(day["places"], list):
-                    return None, "Error: Missing or invalid structure in 'days' element."
+                    raise HTTPException(status_code=500, detail="Missing or invalid structure in 'days' element.")
 
-            # Store response in message list
-            session.messages.append(AIMessage(content=response.content))
+            # Store response in session chat history
+            session.chatHistory.append(AIMessage(content=response.content))
             
             # Process places and calculate routes
-            places = await process_itinerary_places(itinerary_content)
-            routes = await calculate_routes(places)
+            places = await processItineraryPlaces(itineraryContent)
+            routes = await calculateRoutes(places)
 
-            # Prepare response data
-            response_data = {
-                "sessionId": session_id,
-                "itinerary": itinerary_content,
+            # Ensure we return the same sessionId we received
+            responseData = {
+                "sessionId": sessionId,  # This will now match the input sessionId
+                "itinerary": itineraryContent,
                 "places": places,
                 "routes": routes
             }
 
-            return JSONResponse(content={"response": response_data})
+            return JSONResponse(content={"response": responseData})
 
         except json.JSONDecodeError as e:
-            return None, f"Error: Failed to decode JSON. {str(e)}"
+            raise HTTPException(status_code=500, detail=f"Failed to decode JSON: {str(e)}")
             
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
-async def process_itinerary_places(itinerary_content: Dict) -> List[Dict]:
+async def processItineraryPlaces(itinerary_content: Dict) -> List[Dict]:
     """Extract and process place information from itinerary content."""
     names = []
     addresses = []
@@ -260,7 +321,7 @@ async def process_itinerary_places(itinerary_content: Dict) -> List[Dict]:
     
     return places
 
-async def calculate_routes(places: List[Dict]) -> List[Dict]:
+async def calculateRoutes(places: List[Dict]) -> List[Dict]:
     """Calculate routes between consecutive places, excluding airport-to-airport routes."""
     routes = []
     
@@ -349,7 +410,7 @@ async def getPlaceDetailsFromText(client, textQuery):
                         "rating": place["rating"],
                         #"photos": places['photos']
                     })
-                print(f"results: {results}")
+                #print(f"results: {results}")
                 return results
             else:
                 print(f"No places found for query: {textQuery}")
