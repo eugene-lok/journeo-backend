@@ -29,6 +29,76 @@ from typing import Dict, Any, Optional
 #logging.basicConfig(level=logging.INFO)
 #logger = logging.getLogger(__name__)
 
+app = FastAPI()
+
+# Apply CORS middleware
+addCorsMiddleware(app)
+
+# Session storage 
+class SessionData:
+    def __init__(self, entities: Dict[str, Any]):
+        self.entities = entities
+        self.lastAccessed = datetime.now()
+        self.createdAt = datetime.now()
+
+class UserInputModel(BaseModel):
+    userInput: str
+    sessionId: Optional[str] = None
+
+sessionStorage: Dict[str, SessionData] = {}
+
+# Session cleanup function
+def cleanupExpiredSessions(expirationMinutes: int = 30):
+    currentTime = datetime.now()
+    expired_sessions = [
+        sessionId for sessionId, sessionData in sessionStorage.items()
+        if (currentTime - sessionData.lastAccessed) > timedelta(minutes=expirationMinutes)
+    ]
+    for sessionId in expired_sessions:
+        del sessionStorage[sessionId]
+
+workflow = createTravelPreferenceWorkflow()   
+
+@app.post("/api/extract-preferences/")
+async def extract_travel_preferences(inputData: UserInputModel):
+    try:
+        # Clean up expired sessions first
+        cleanupExpiredSessions()
+
+        # Get or create session ID
+        sessionId = inputData.sessionId
+        if not sessionId or sessionId not in sessionStorage:
+            sessionId = str(uuid.uuid4())
+            sessionStorage[sessionId] = SessionData(entities={})
+        
+        # Update last accessed time
+        sessionStorage[sessionId].lastAccessed = datetime.now()
+        
+        # Get previous entities for this specific session
+        previousEntities = sessionStorage[sessionId].entities
+        
+        config = {"configurable": {"thread_id": f"pref_{sessionId}"}}
+        
+        initialInput = {
+            'userInput': inputData.userInput,
+            'previousEntities': previousEntities
+        }
+        
+        result = workflow.invoke(initialInput, config=config)
+        
+        # Update session storage with new entities
+        sessionStorage[sessionId].entities = result.get('extractedEntities', {})
+        
+        return {
+            "sessionId": sessionId,
+            "extractedEntities": result.get('extractedEntities', {}),
+            "missingEntities": result.get('missingEntities', []),
+            "isComplete": result.get('isComplete', False),
+            "clarificationMessage": result.get('clarificationMessage', "")
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 responseFormat = {
@@ -62,91 +132,19 @@ responseFormat = {
                         "required": ["day","places","summaryOfDay"],
                         "additionalProperties": False                       
                     }              
-                }
+                },
+                "budgetBreakdown": {"type": "string"}
             },
-            "required": ["days"],
+            "required": ["days", "budgetBreakdown"],
             "additionalProperties": False
         },
         "strict": True,
     }
 }
 
-app = FastAPI()
-
-# Apply CORS middleware
-addCorsMiddleware(app)
-
-# Add router
-#app.include_router(authRouter)
-
-# Session storage 
-class SessionData:
-    def __init__(self, entities: Dict[str, Any]):
-        self.entities = entities
-        self.last_accessed = datetime.now()
-        self.created_at = datetime.now()
-
-class UserInputModel(BaseModel):
-    user_input: str
-    sessionId: Optional[str] = None
-
-sessionStorage: Dict[str, SessionData] = {}
-
-# Session cleanup function
-def cleanupExpiredSessions(expiration_minutes: int = 30):
-    current_time = datetime.now()
-    expired_sessions = [
-        sessionId for sessionId, sessionData in sessionStorage.items()
-        if (current_time - sessionData.last_accessed) > timedelta(minutes=expiration_minutes)
-    ]
-    for sessionId in expired_sessions:
-        del sessionStorage[sessionId]
-
-workflow = createTravelPreferenceWorkflow()   
-
-@app.post("/api/extract-preferences/")
-async def extract_travel_preferences(input_data: UserInputModel):
-    try:
-        # Clean up expired sessions first
-        cleanupExpiredSessions()
-
-        # Get or create session ID
-        sessionId = input_data.sessionId
-        if not sessionId or sessionId not in sessionStorage:
-            sessionId = str(uuid.uuid4())
-            sessionStorage[sessionId] = SessionData(entities={})
-        
-        # Update last accessed time
-        sessionStorage[sessionId].last_accessed = datetime.now()
-        
-        # Get previous entities for this specific session
-        previous_entities = sessionStorage[sessionId].entities
-        
-        config = {"configurable": {"thread_id": f"pref_{sessionId}"}}
-        
-        initial_input = {
-            'userInput': input_data.user_input,
-            'previousEntities': previous_entities
-        }
-        
-        result = workflow.invoke(initial_input, config=config)
-        
-        # Update session storage with new entities
-        sessionStorage[sessionId].entities = result.get('extractedEntities', {})
-        
-        return {
-            "sessionId": sessionId,
-            "extracted_entities": result.get('extractedEntities', {}),
-            "missing_entities": result.get('missingEntities', []),
-            "is_complete": result.get('isComplete', False),
-            "clarificationMessage": result.get('clarificationMessage', "")
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    
 llm = ChatOpenAI(
     model="gpt-4o-mini",
-    temperature=0.7,
+    temperature=0.5,
     max_tokens=1500,
     timeout=None,
     max_retries=2,
@@ -157,25 +155,14 @@ llm = ChatOpenAI(
 ## Implement different budget options, don't have to ask for budget
 
 systemPromptShort = (
-    f"You are a travel agent. Your job is to generate a complete itinerary based on the user’s input. "
-    f"Your goal is to gather the following information from the user:\n"
+    f"You are a travel agent. Your job is to generate a complete itinerary based on these parameters:"
     f"- **Trip duration** (phrased as 'X days', 'X-day trip', 'a week', or 'from date A to date B').\n"
     f"- **Trip origin** (phrased as 'from X', 'starting in X', or 'origin is X').\n"
     f"- **Trip destination** (phrased as 'to X', 'destination is X', or 'visit X').\n"
     f"- **Number of travellers** (phrased as 'for X people', 'with X people', 'X people going', 'alone', or 'solo').\n"
     f"- **Trip budget** (phrased as '$X', 'a budget of X', or 'around X').\n\n"
-
-    f"### Duration Handling:\n"
-    f"**If the user specifies the duration in any form (e.g., 'X days', 'a week', or a range like 'from date A to date B'), assume the duration is complete and do not ask for it again.**\n\n"
-
-    f"### Origin Handling:\n"
-    f"**If the user specifies the origin with phrases like 'from X', 'starting in X', or 'origin is X', assume the origin is complete and do not ask for it again.**\n\n"
-
-    f"### Destination Handling:\n"
-    f"**If the user specifies the destination with phrases like 'to X', 'destination is X', or 'visit X', assume the destination is complete and do not ask for it again.**\n\n"
-
-    f"### Number of Travellers Handling:\n"
-    f"**If the user specifies the number of travellers with phrases like 'for X people', 'with X people', 'X people going', 'alone', or 'solo', assume the number of travellers is complete and do not ask for it again. Interpret 'alone' or 'solo' as 1 traveller.**\n\n"
+    f"Every address you generate MUST be an exact, real address. Don't use various places or a placeholder.\n"
+    f"In your budgetBreakdown in your response, include a comprehensive description of how the budget is distributed throughout the trip."
 )
 
 systemMessage = SystemMessagePromptTemplate.from_template(systemPromptShort)
