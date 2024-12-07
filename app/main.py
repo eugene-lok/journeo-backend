@@ -23,7 +23,7 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 # Configure logging
 #logging.basicConfig(level=logging.INFO)
@@ -169,156 +169,151 @@ systemMessage = SystemMessagePromptTemplate.from_template(systemPromptShort)
 messageHistory = MessagesPlaceholder(variable_name="messages")
 messagesList = []    
 
+
 @app.post("/api/chat/")
-async def chatResponse(message: UserMessage):
-
+async def chat_response(
+    message: UserMessage,
+    session_info: tuple[str, SessionData] = Depends(get_session)
+):
     try:
-        humanMessage = HumanMessagePromptTemplate.from_template("{input}")
+        session_id, session = session_info
         
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                systemMessage, 
-                humanMessage,
-                messageHistory           
-            ]
-        )
+        # Prepare the chat prompt
+        human_message = HumanMessagePromptTemplate.from_template("{input}")
+        prompt = ChatPromptTemplate.from_messages([
+            systemMessage,
+            human_message,
+            messageHistory
+        ])
 
-        # Add human message in message list
-        messagesList.append(HumanMessage(content=message.input))
-
-        # Generate the response using the chain
+        # Add human message and generate response
+        session.messages.append(HumanMessage(content=message.input))
         chain = prompt | llm
+        response = chain.invoke({
+            "input": message.input,
+            "messages": session.messages
+        })
 
-        response = chain.invoke(
-            {
-                "input": message.input, 
-                "messages": messagesList
-            }
-        )
-        
         # Validate response
         if not response.content or not response.content.strip():
             return None, "Error: Empty or null JSON response."
+
         try:
-            itineraryContent = json.loads(response.content)
+            itinerary_content = json.loads(response.content)
             print(f"\nResponse Formatted: {response.content}")
-            # Check for incomplete structure
-            for day in itineraryContent.get("days"):
+            
+            # Validate itinerary structure
+            for day in itinerary_content.get("days"):
                 if "day" not in day or "places" not in day or not isinstance(day["places"], list):
                     return None, "Error: Missing or invalid structure in 'days' element."
-                else:
-                    continue
 
             # Store response in message list
-            messagesList.append(AIMessage(content=response.content))
+            session.messages.append(AIMessage(content=response.content))
             
-            names = []
-            addresses = []
-            for day in itineraryContent["days"]:
-                for place in day["places"]:
-                    names.append(place["name"])
-                    addresses.append(place["address"])
+            # Process places and calculate routes
+            places = await process_itinerary_places(itinerary_content)
+            routes = await calculate_routes(places)
 
-            # Get coordinates and googlePlaceId of addresses
-            placesInfo = await getAllPlaceDetails(names, addresses)
-
-            places = []
-
-            # Assign attributes to each place
-            for id, (name, address, placeInfo) in enumerate(zip(names, addresses, placesInfo)):
-                place = {
-                    "id": id,
-                    "name": name,
-                    "isAirport": None,
-                    "address": address,
-                    "initialPlaceId": placeInfo['initialPlaceId'],
-                    "coordinates": placeInfo['coordinates'],
-                    "predictedLocation": placeInfo['placePrediction'],
-                    "details": placeInfo['details']
-                }
-                checkIfAirport(place)
-                places.append(place)
-            
-            # TODO: # Create new keys in itinerary for place details
             # Prepare response data
-            responseData = {
-                "itinerary": itineraryContent,
-                "places": places
+            response_data = {
+                "sessionId": session_id,
+                "itinerary": itinerary_content,
+                "places": places,
+                "routes": routes
             }
-            # TODO: # Organize routes by day
-            routes = []
 
-            if len(places) >= 2:
-                # List of consecutive place pairs
-                consecutivePairs = []
-                for i in range(len(places) - 1):
-                    fromPlace = places[i]
-                    toPlace = places[i + 1]
-                    consecutivePairs.append((fromPlace, toPlace))
-
-                # Filter out pairs where both are airports
-                nonAirportPairs = []
-                for fromPlace, toPlace in consecutivePairs:
-                    if not (fromPlace.get("isAirport", False) and toPlace.get("isAirport", False)):
-                        nonAirportPairs.append((fromPlace, toPlace))
-
-                # Create route fetching tasks and keep track of pairs
-                routeTasks = []
-                routePairs = []
-
-                async with httpx.AsyncClient() as client:
-                    for fromPlace, toPlace in nonAirportPairs:
-                        task = getRouteFromMapbox(
-                            client,
-                            startCoords=fromPlace["coordinates"],
-                            endCoords=toPlace["coordinates"]
-                        )
-                        routeTasks.append(task)
-                        routePairs.append((fromPlace, toPlace))
-
-                    # Gather all route tasks
-                    route_results = await asyncio.gather(*routeTasks, return_exceptions=True)
-
-                # Add route pairs and routes
-                for index, result in enumerate(route_results):
-                    fromPlace, toPlace = routePairs[index]
-
-                    # Check for exception
-                    if isinstance(result, Exception):
-                        print(f"Failed to fetch route between {fromPlace['name']} and {toPlace['name']}: {result}")
-                        continue 
-                    
-                    # Append routes to list
-                    if result:
-                        routes.append({
-                            "from": {
-                                "id": fromPlace["id"],
-                                "name": fromPlace["name"],
-                                "coordinates": fromPlace["coordinates"]
-                            },
-                            "to": {
-                                "id": toPlace["id"],
-                                "name": toPlace["name"],
-                                "coordinates": toPlace["coordinates"]
-                            },
-                            "route": result 
-                        })
-                    else:
-                        print(f"No route found between {fromPlace['name']} and {toPlace['name']}.")
-
-            # Add routes to response 
-            responseData["routes"] = routes
-
-            #print(responseData)
-            # Return formatted response
-            botResponse = {"response": responseData}
-            return JSONResponse(content=botResponse)        
+            return JSONResponse(content={"response": response_data})
 
         except json.JSONDecodeError as e:
             return None, f"Error: Failed to decode JSON. {str(e)}"
+            
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
+async def process_itinerary_places(itinerary_content: Dict) -> List[Dict]:
+    """Extract and process place information from itinerary content."""
+    names = []
+    addresses = []
+    for day in itinerary_content["days"]:
+        for place in day["places"]:
+            names.append(place["name"])
+            addresses.append(place["address"])
+
+    # Get coordinates and googlePlaceId of addresses
+    places_info = await getAllPlaceDetails(names, addresses)
+    
+    places = []
+    # Assign attributes to each place
+    for id, (name, address, place_info) in enumerate(zip(names, addresses, places_info)):
+        place = {
+            "id": id,
+            "name": name,
+            "isAirport": None,
+            "address": address,
+            "initialPlaceId": place_info['initialPlaceId'],
+            "coordinates": place_info['coordinates'],
+            "predictedLocation": place_info['placePrediction'],
+            "details": place_info['details']
+        }
+        checkIfAirport(place)
+        places.append(place)
+    
+    return places
+
+async def calculate_routes(places: List[Dict]) -> List[Dict]:
+    """Calculate routes between consecutive places, excluding airport-to-airport routes."""
+    routes = []
+    
+    if len(places) < 2:
+        return routes
+
+    # Create pairs of consecutive places
+    consecutive_pairs = [(places[i], places[i + 1]) for i in range(len(places) - 1)]
+    
+    # Filter out pairs where both are airports
+    non_airport_pairs = [
+        (from_place, to_place) for from_place, to_place in consecutive_pairs
+        if not (from_place.get("isAirport", False) and to_place.get("isAirport", False))
+    ]
+
+    async with httpx.AsyncClient() as client:
+        route_tasks = [
+            getRouteFromMapbox(
+                client,
+                startCoords=from_place["coordinates"],
+                endCoords=to_place["coordinates"]
+            )
+            for from_place, to_place in non_airport_pairs
+        ]
+        
+        route_results = await asyncio.gather(*route_tasks, return_exceptions=True)
+
+        # Process route results
+        for (from_place, to_place), result in zip(non_airport_pairs, route_results):
+            if isinstance(result, Exception):
+                print(f"Failed to fetch route between {from_place['name']} and {to_place['name']}: {result}")
+                continue
+            
+            if result:
+                routes.append({
+                    "from": {
+                        "id": from_place["id"],
+                        "name": from_place["name"],
+                        "coordinates": from_place["coordinates"]
+                    },
+                    "to": {
+                        "id": to_place["id"],
+                        "name": to_place["name"],
+                        "coordinates": to_place["coordinates"]
+                    },
+                    "route": result
+                })
+            else:
+                print(f"No route found between {from_place['name']} and {to_place['name']}.")
+
+    return routes
+
+
 # Get place type and details from Google Text Search API
 async def getPlaceDetailsFromText(client, textQuery):
     googleAPIKey = os.getenv("GOOGLE_API_KEY")
