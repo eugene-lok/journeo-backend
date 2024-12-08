@@ -61,11 +61,14 @@ async def getAllPlaceDetails(names: list[str], addresses: list[str]):
     return results
 
 
-# Get lat, long, and place_id from Google Geocoding API
 async def getCoordinatesGoogle(client, address):
     print(f"Address: {address}")
     googleAPIKey = os.getenv("GOOGLE_API_KEY")
-    geocodeUrl = f"https://maps.googleapis.com/maps/api/geocode/json?address={address}&key={googleAPIKey}"
+    
+    # URL encode the address
+    encoded_address = urllib.parse.quote(address)
+    geocodeUrl = f"https://maps.googleapis.com/maps/api/geocode/json?address={encoded_address}&key={googleAPIKey}"
+    
     try:
         response = await client.get(geocodeUrl)
         if response.status_code == 200:
@@ -73,7 +76,6 @@ async def getCoordinatesGoogle(client, address):
             if data["results"]:
                 location = data["results"][0]["geometry"]["location"]
                 placeId = data["results"][0]["place_id"]
-                #print(data["results"][0]["geometry"])
                 return {
                     "coordinates": {
                         "latitude": location["lat"],
