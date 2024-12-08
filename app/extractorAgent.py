@@ -50,9 +50,8 @@ responseFormat = {
                     "additionalProperties": False
                 },
                 "clarificationMessage": {"type": "string"},
-                "completionMessage": {"type": "string"}
             },
-            "required": ["entities","clarificationMessage","completionMessage"],
+            "required": ["entities","clarificationMessage"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -77,10 +76,6 @@ ENTITY_EXTRACTION_PROMPT = PromptTemplate(
        - Previously known entities (above)
        - Newly extracted entities (from current input)
     4. Do not ask about information that exists in either previous OR new entities
-    5. The final completion message should provide a brief, engaging completion message that:
-       - Acknowledges the itinerary is ready
-       - Names the main destination(s)
-       - Encourages the user to explore the details
 
     Required entities:
     - Destinations (cities/countries/regions)
@@ -104,7 +99,6 @@ ENTITY_EXTRACTION_PROMPT = PromptTemplate(
     "includesChildren": "true/false or null",
     "includesPets": "true/false or null"
     "clarificationMessage": "If ANY entities are missing after combining previous and new, provide a question about the missing information. If ALL entities are complete, this MUST be an empty string.",
-    "completionMessage": "If ALL entities are complete (no missing information), provide an engaging completion message. If ANY information is missing, this MUST be an empty string."
     """
 )
 
@@ -178,7 +172,6 @@ def extractEntities(state: TravelPreferenceState, config):
         responseData = json.loads(cleanedResponse)
         newEntities = responseData['entities']
         clarificationMessage = responseData['clarificationMessage']
-        completionMessage = responseData['completionMessage']
         print("Parsed new entities:", newEntities)
         
         # Merge with previous entities
@@ -198,7 +191,6 @@ def extractEntities(state: TravelPreferenceState, config):
             'extractedEntities': extractedEntities,
             'missingEntities': missingEntities,
             'clarificationMessage': clarificationMessage,
-            'completionMessage': completionMessage,
             'isComplete': len(missingEntities) == 0
         }
     except Exception as e:
@@ -209,7 +201,6 @@ def extractEntities(state: TravelPreferenceState, config):
             'extractedEntities': previousEntities,
             'missingEntities': list(ENTITY_DESCRIPTIONS.keys()),
             'clarificationMessage': "I had trouble understanding that. Could you please provide some details about your trip?",
-            'completionMessage': "",
             'isComplete': False
         }
 

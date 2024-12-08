@@ -173,7 +173,6 @@ async def extractTravelPreferences(inputData: UserInputModel):
             "missingEntities": result.get('missingEntities', []),
             "isComplete": result.get('isComplete', False),
             "clarificationMessage": result.get('clarificationMessage', ""),
-            "completionMessage": result.get('completionMessage', "")
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -210,9 +209,10 @@ responseFormat = {
                         "additionalProperties": False                       
                     }              
                 },
-                "budgetBreakdown": {"type": "string"}
+                "budgetBreakdown": {"type": "string"},
+                "completionMessage": {"type": "string"}
             },
-            "required": ["days", "budgetBreakdown"],
+            "required": ["days", "budgetBreakdown", "completionMessage"],
             "additionalProperties": False
         },
         "strict": True,
@@ -251,7 +251,11 @@ systemPromptShort = (
     f"4. Activities and context should be included in the description field, NOT in the name field.\n"
     f"   Example description: 'Departing flight from this major international airport serving Calgary.'\n\n"
     f" Use present tense in each daySummary. Use a neutral, directive style appropriate for itineraries. Do not use future tense.\n"
-    f"In your budgetBreakdown in your response, include a comprehensive description of how the budget is distributed throughout the trip."
+    f"In your budgetBreakdown in your response, include a comprehensive description of how the budget is distributed throughout the trip.\n"
+    f"Your completionMessage should provide a brief completion message that:\n"
+    f"   - Acknowledges the itinerary is ready\n"
+    f"   - Names the main destination(s)\n"
+    f"   - Encourages the user to explore the map\n"
 )
 
 systemMessage = SystemMessagePromptTemplate.from_template(systemPromptShort)
