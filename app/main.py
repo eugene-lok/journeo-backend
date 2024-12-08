@@ -18,7 +18,7 @@ from app.models import UserItinerary, UserMessage
 from app.middleware import addCorsMiddleware
 from app.mapboxRoutes import getRouteFromMapbox
 from app.loggerConfig import logger
-from app.geoTools.geocoding import *
+from app.functions.geocoding import *
 from app.extractorAgent import createTravelPreferenceWorkflow
 
 import os
@@ -172,12 +172,11 @@ async def extractTravelPreferences(inputData: UserInputModel):
             "extractedEntities": result.get('extractedEntities', {}),
             "missingEntities": result.get('missingEntities', []),
             "isComplete": result.get('isComplete', False),
-            "clarificationMessage": result.get('clarificationMessage', "")
+            "clarificationMessage": result.get('clarificationMessage', ""),
+            "completionMessage": result.get('completionMessage', "")
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
 
 responseFormat = {
     "type": "json_schema",
