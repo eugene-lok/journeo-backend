@@ -317,17 +317,16 @@ async def chatResponse(message: ChatRequest):
             
             # Process places and calculate routes
             places = await processItineraryPlaces(itineraryContent)
-            routes = await calculateRoutes(places)
 
-            # Merge place details into itinerary content
-            mergedItineraryContent = await mergePlaceDetailsIntoItinerary(itineraryContent, places)
+            # Merge place details and routes into itinerary content
+            mergedItinerary = await mergePlaceDetailsIntoItinerary(itineraryContent, places)
+            finalItinerary = await calculateDailyRoutes(mergedItinerary)
 
-            # Ensure same sessionId that was returned
+            # Format response
             responseData = {
                 "sessionId": sessionId,  
-                "itinerary": mergedItineraryContent,
+                "itinerary": finalItinerary,
                 "places": places,
-                "routes": routes
             }
 
             return JSONResponse(content={"response": responseData})
@@ -390,58 +389,75 @@ async def processItineraryPlaces(itinerary_content: Dict) -> List[Dict]:
     
     return places
 
-async def calculateRoutes(places: List[Dict]) -> List[Dict]:
-    """Calculate routes between consecutive places, excluding airport-to-airport routes."""
-    routes = []
+# Obtains and generates all routes in parallel using Mapbox Route API and organize them by day 
+async def calculateDailyRoutes(itineraryContent: Dict) -> Dict:
     
-    if len(places) < 2:
-        return routes
-
-    # Create pairs of consecutive places
-    consecutive_pairs = [(places[i], places[i + 1]) for i in range(len(places) - 1)]
+    # Collect all place pairs and respective day
+    allPairs = []
+    dayIndices = []  # Keep track of which day each pair belongs to
     
-    # Filter out pairs where both are airports
-    non_airport_pairs = [
-        (from_place, to_place) for from_place, to_place in consecutive_pairs
-        if not (from_place.get("isAirport", False) and to_place.get("isAirport", False))
-    ]
-
-    async with httpx.AsyncClient() as client:
-        route_tasks = [
-            getRouteFromMapbox(
-                client,
-                startCoords=from_place["coordinates"],
-                endCoords=to_place["coordinates"]
-            )
-            for from_place, to_place in non_airport_pairs
+    for dayIndex, day in enumerate(itineraryContent["days"]):
+        places = day["places"]
+        if len(places) < 2:
+            continue
+            
+        # Create pairs of consecutive places for a day
+        dayPairs = [(places[i], places[i + 1]) 
+                    for i in range(len(places) - 1)]
+        
+        # Filter out airport-to-airport pairs
+        nonAirportPairs = [
+            (fromPlace, toPlace) for fromPlace, toPlace in dayPairs
+            if not (fromPlace.get("isAirport", False) and 
+                   toPlace.get("isAirport", False))
         ]
         
-        route_results = await asyncio.gather(*route_tasks, return_exceptions=True)
+        allPairs.extend(nonAirportPairs)
+        dayIndices.extend([dayIndex] * len(nonAirportPairs))
 
-        # Process route results
-        for (from_place, to_place), result in zip(non_airport_pairs, route_results):
+    # Calculate all routes in parallel
+    async with httpx.AsyncClient() as client:
+        routeTasks = [
+            getRouteFromMapbox(
+                client,
+                startCoords=fromPlace["coordinates"],
+                endCoords=toPlace["coordinates"]
+            )
+            for fromPlace, toPlace in allPairs
+        ]
+        
+        routeResults = await asyncio.gather(*routeTasks, return_exceptions=True)
+        
+        # Initialize empty routes list for each day
+        for day in itineraryContent["days"]:
+            day["routes"] = []
+        
+        # Process results and organize by day
+        for (fromPlace, toPlace), result, dayIndex in zip(allPairs, routeResults, dayIndices):
             if isinstance(result, Exception):
-                print(f"Failed to fetch route between {from_place['name']} and {to_place['name']}: {result}")
+                print(f"Failed to fetch route between {fromPlace['name']} "
+                      f"and {toPlace['name']}: {result}")
                 continue
             
             if result:
-                routes.append({
+                route = {
                     "from": {
-                        "id": from_place["id"],
-                        "name": from_place["name"],
-                        "coordinates": from_place["coordinates"]
+                        "id": fromPlace.get("id"),
+                        "name": fromPlace["name"],
+                        "coordinates": fromPlace["coordinates"]
                     },
                     "to": {
-                        "id": to_place["id"],
-                        "name": to_place["name"],
-                        "coordinates": to_place["coordinates"]
+                        "id": toPlace.get("id"),
+                        "name": toPlace["name"],
+                        "coordinates": toPlace["coordinates"]
                     },
                     "route": result
-                })
+                }
+                itineraryContent["days"][dayIndex]["routes"].append(route)
             else:
-                print(f"No route found between {from_place['name']} and {to_place['name']}.")
-
-    return routes
+                print(f"No route found between {fromPlace['name']} "
+                      f"and {toPlace['name']}.")
+    return itineraryContent
 
 
 # Get place type and details from Google Text Search API
