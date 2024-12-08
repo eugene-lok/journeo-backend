@@ -112,6 +112,10 @@ class UserMessage(SessionRequest):
 class UserInputModel(SessionRequest):
     userInput: str
 
+class ChatRequest(BaseModel):
+    sessionId: str
+    entities: Dict[str, Any]  
+
 @app.post("/api/validate-session/")
 async def validateSession(sessionRequest: SessionRequest):
     try:
@@ -247,7 +251,7 @@ systemPromptShort = (
     f"3. Every address MUST be an exact, real address. Do not use placeholders or approximate locations.\n\n"
     f"4. Activities and context should be included in the description field, NOT in the name field.\n"
     f"   Example description: 'Departing flight from this major international airport serving Calgary.'\n\n"
-    f" Use present tense when summarizing each day. Do not use future tense.\n"
+    f" Use present tense in each daySummary. Use a neutral, directive style appropriate for itineraries. Do not use future tense.\n"
     f"In your budgetBreakdown in your response, include a comprehensive description of how the budget is distributed throughout the trip."
 )
 
@@ -256,7 +260,7 @@ messageHistory = MessagesPlaceholder(variable_name="messages")
 messagesList = []    
 
 @app.post("/api/chat/")
-async def chatResponse(message: UserMessage):
+async def chatResponse(message: ChatRequest):
     try:
         print(f"Raw message received: {message}")
         sessionId, session = await getOrCreateSession(message)
@@ -274,28 +278,25 @@ async def chatResponse(message: UserMessage):
         ])
 
         # Use stored entities if available, otherwise use input
-        input_content = message.input
-        if isinstance(input_content, dict):
-            # Merge with stored entities to ensure we have complete data
-            entities = stored_entities if stored_entities else input_content
-            formatted_input = (
-                f"Please create an itinerary for {entities.get('duration', 'N/A')} "
-                f"in {entities.get('destinations', 'N/A')} "
-                f"for {entities.get('numTravellers', '1')} traveler(s) "
-                f"with a budget of {entities.get('budget', 'N/A')}. "
-                f"Start date: {entities.get('startDate', 'N/A')}. "
-                f"{'Includes children. ' if entities.get('includesChildren') == 'true' else ''}"
-                f"{'Includes pets. ' if entities.get('includesPets') == 'true' else ''}"
-            )
-            input_content = formatted_input
+        # Use entities directly without checking if it's a dict
+        entities = stored_entities if stored_entities else message.entities
+        formatted_input = (
+            f"Please create an itinerary for {entities.get('duration', 'N/A')} "
+            f"in {entities.get('destinations', 'N/A')} "
+            f"for {entities.get('numTravellers', '1')} traveler(s) "
+            f"with a budget of {entities.get('budget', 'N/A')}. "
+            f"Start date: {entities.get('startDate', 'N/A')}. "
+            f"{'Includes children. ' if entities.get('includesChildren') == 'true' else ''}"
+            f"{'Includes pets. ' if entities.get('includesPets') == 'true' else ''}"
+        )
 
-        print(f"Formatted input for LLM: {input_content}")
+        print(f"Formatted input for LLM: {formatted_input}")
         
-        session.chatHistory.append(HumanMessage(content=str(input_content)))
+        session.chatHistory.append(HumanMessage(content=str(formatted_input)))
         
         chain = prompt | llm
         response = chain.invoke({
-            "input": input_content,
+            "input": formatted_input,
             "messages": session.chatHistory
         })
 
@@ -316,11 +317,12 @@ async def chatResponse(message: UserMessage):
             
             # Process places and calculate routes
             places = await processItineraryPlaces(itineraryContent)
+            print(f"Places: {places}")
             routes = await calculateRoutes(places)
 
-            # Ensure we return the same sessionId we received
+            # Ensure same sessionId that was returned
             responseData = {
-                "sessionId": sessionId,  # This will now match the input sessionId
+                "sessionId": sessionId,  
                 "itinerary": itineraryContent,
                 "places": places,
                 "routes": routes
