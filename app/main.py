@@ -317,13 +317,15 @@ async def chatResponse(message: ChatRequest):
             
             # Process places and calculate routes
             places = await processItineraryPlaces(itineraryContent)
-            print(f"Places: {places}")
             routes = await calculateRoutes(places)
+
+            # Merge place details into itinerary content
+            mergedItineraryContent = await mergePlaceDetailsIntoItinerary(itineraryContent, places)
 
             # Ensure same sessionId that was returned
             responseData = {
                 "sessionId": sessionId,  
-                "itinerary": itineraryContent,
+                "itinerary": mergedItineraryContent,
                 "places": places,
                 "routes": routes
             }
@@ -336,8 +338,30 @@ async def chatResponse(message: ChatRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
+async def mergePlaceDetailsIntoItinerary(itineraryContent, places):
+    # Create map of name and address to place details
+    placeDetailsMap = {
+        (place["name"], place["address"]): {
+            key: value for key, value in place.items() 
+            if key not in ["name", "address"]
+        }
+        for place in places
+    }
+    
+    # Iterate through each day and place in itinerary
+    for day in itineraryContent["days"]:
+        for place in day["places"]:
+            # Look up details using name and address as key
+            details = placeDetailsMap.get((place["name"], place["address"]), {})
+            # Update place with place details
+            place.update(details)
+    
+    return itineraryContent    
+    
 async def processItineraryPlaces(itinerary_content: Dict) -> List[Dict]:
     """Extract and process place information from itinerary content."""
+
+    print(f"itineraryOnlyContent{itinerary_content}")
     names = []
     addresses = []
     for day in itinerary_content["days"]:
