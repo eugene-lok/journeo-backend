@@ -2,6 +2,7 @@ import os
 import re
 import httpx
 import asyncio
+import urllib.parse
 
 # Geocode list of addresses in parallel requests and fetches place details in parallel
 async def getAllPlaceDetails(names: list[str], addresses: list[str]):
@@ -9,6 +10,7 @@ async def getAllPlaceDetails(names: list[str], addresses: list[str]):
         geocodeTasks = []
         autoCompleteTasks = []
         detailsTasks = []
+        photoTasks = []
 
         # Geocode addresses to obtain coordinates and placeId 
         for address in addresses:
@@ -47,14 +49,38 @@ async def getAllPlaceDetails(names: list[str], addresses: list[str]):
                 detailsResults.append(detailsResult)
             else:
                 detailsResults.append(None)
+        # Obtain place photo names from details
+        placePhotoNames = []
+        for detailsResult in detailsResults:
+            if detailsResult is not None:
+                placePhotoNames.append(detailsResult['photos'][0]['name'])
+            else:
+                placePhotoNames.append('N/A')
+       
+        # Fetch place photo uris from photo names
+        for placePhotoName in placePhotoNames:
+            if placePhotoName is not 'N/A':
+                photoTask = getPlacePhotoFromPhotoName(client, placePhotoName)
+                photoTasks.append(photoTask)
+            else:
+                photoTasks.append(None)
+        # Await all photo tasks
+        photoResults = []
+        for photoTask in photoTasks:
+            if photoTask is not None:
+                photoResult = await photoTask
+                photoResults.append(photoResult)
+            else:
+                photoResults.append(None)
         
         # Compile all results
         results = []
-        for geocodeResult, autoCompleteResult, detailsResult in zip(geocodeResults, autoCompleteResults, detailsResults):
+        for geocodeResult, autoCompleteResult, detailsResult, photoResult in zip(geocodeResults, autoCompleteResults, detailsResults, photoResults):
             result = {
                 "initialPlaceId": geocodeResult['placeId'],
                 "coordinates": geocodeResult['coordinates'],
                 "placePrediction": autoCompleteResult,
+                "photoUri": photoResult,
                 "details": detailsResult
             }
             results.append(result)
@@ -180,7 +206,7 @@ async def getPlaceFromAutocomplete(client, input, coordinates):
 # Get place details from Google Place Details API using Place ID
 async def getPlaceDetailsFromId(client, placeId):
     googleAPIKey = os.getenv("GOOGLE_API_KEY")
-    fields = "id,displayName,primaryType,primaryTypeDisplayName,types,websiteUri,googleMapsUri,internationalPhoneNumber,nationalPhoneNumber,containingPlaces,viewport"
+    fields = "id,displayName,primaryType,primaryTypeDisplayName,types,websiteUri,googleMapsUri,internationalPhoneNumber,nationalPhoneNumber,containingPlaces,viewport,photos"
     headers = {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': googleAPIKey,
@@ -205,6 +231,7 @@ async def getPlaceDetailsFromId(client, placeId):
                     "internationalPhoneNumber": result.get("internationalPhoneNumber"),
                     "nationalPhoneNumber": result.get("nationalPhoneNumber"),
                     "viewport": result.get("viewport"),
+                    "photos": result.get("photos"),
                 }
             else:
                 print(f"No result found for placeId: {placeId}")
@@ -214,6 +241,33 @@ async def getPlaceDetailsFromId(client, placeId):
             return None
     except Exception as e:
         print(f"Exception occurred while fetching place details for placeId: {placeId}: {e}")
+        return None
+
+# Get place photo from Google Place Details API using Place ID and photo name
+async def getPlacePhotoFromPhotoName(client, photoName):
+    googleAPIKey = os.getenv("GOOGLE_API_KEY")
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': googleAPIKey,
+    }
+    placePhotoUrl = f"https://places.googleapis.com/v1/{photoName}/media?maxHeightPx=1600&skipHttpRedirect=true"
+    try:
+        response = await client.get(placePhotoUrl, headers=headers)
+        if response.status_code == 200:
+            result = response.json()
+            if result is not None:
+                print(f"Photo Uri:{result.get("photoUri")}")
+                return {
+                    "photoDetails": result.get("photoUri")
+                }
+            else:
+                print(f"No results found for photo name: {photoName}")
+                return None
+        else:
+            print(f"Error fetching uri for photo {photoName}: {response.text}")
+            return None
+    except Exception as e:
+        print(f"Exception occurred while fetching uri for photo {photoName}: {e}")
         return None
 
 # Assigns isAirport attribute of place

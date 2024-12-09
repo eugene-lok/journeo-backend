@@ -385,7 +385,8 @@ async def processItineraryPlaces(itinerary_content: Dict) -> List[Dict]:
             "initialPlaceId": place_info['initialPlaceId'],
             "coordinates": place_info['coordinates'],
             "predictedLocation": place_info['placePrediction'],
-            "details": place_info['details']
+            "details": place_info['details'],
+            "photoUri": place_info['photoUri']
         }
         checkIfAirport(place)
         places.append(place)
