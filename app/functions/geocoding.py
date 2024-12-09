@@ -11,196 +11,185 @@ async def getAllPlaceDetails(names: list[str], addresses: list[str]):
         autoCompleteTasks = []
         detailsTasks = []
         photoTasks = []
+        results = []
+
+        # Validate inputs
+        if not names or not addresses or len(names) != len(addresses):
+            print("Invalid input: names and addresses must be non-empty and of equal length")
+            return []
 
         # Geocode addresses to obtain coordinates and placeId 
         for address in addresses:
             geocodeTask = getCoordinatesGoogle(client, address)
             geocodeTasks.append(geocodeTask)
         geocodeResults = await asyncio.gather(*geocodeTasks)
-        # Obtain coordinates from geocoded addresses
-        coordinates = [geocodeResult['coordinates'] for geocodeResult in geocodeResults]
         
+        # Filter out None results and get coordinates
+        validGeoResults = [result for result in geocodeResults if result is not None]
+        if not validGeoResults:
+            print("No valid geocoding results found")
+            return []
+            
         # Use name and coordinates to fetch precise placeId
-        for name, coordinate in zip(names, coordinates):
-            autoCompleteTask = getPlaceFromAutocomplete(client, name, coordinate)
+        for name, geocodeResult in zip(names[:len(validGeoResults)], validGeoResults):
+            if not geocodeResult.get('coordinates'):
+                autoCompleteTasks.append(None)
+                continue
+            autoCompleteTask = getPlaceFromAutocomplete(client, name, geocodeResult['coordinates'])
             autoCompleteTasks.append(autoCompleteTask)
         autoCompleteResults = await asyncio.gather(*autoCompleteTasks)
 
-        # Obtain new place IDs from queried locations
-        precisePlaceIds = []
-        for autoCompleteResult in autoCompleteResults:
-            if autoCompleteResult is not None:
-                precisePlaceIds.append(autoCompleteResult['precisePlaceId'])
-            else:
-                precisePlaceIds.append(None)
+        # Fetch place details and photos
+        for geocodeResult, autoCompleteResult in zip(validGeoResults, autoCompleteResults):
+            try:
+                # Initialize default result structure
+                result = {
+                    "initialPlaceId": geocodeResult.get('placeId'),
+                    "coordinates": geocodeResult.get('coordinates'),
+                    "placePrediction": None,
+                    "photoUri": None,
+                    "details": None
+                }
 
-        # Fetch place details using precisePlaceIds
-        for precisePlaceId in precisePlaceIds:
-            if precisePlaceId is not None:
-                detailsTask = getPlaceDetailsFromId(client, precisePlaceId)
-                detailsTasks.append(detailsTask)
-            else:
-                detailsTasks.append(None)
-        # Await all details tasks
-        detailsResults = []
-        for detailsTask in detailsTasks:
-            if detailsTask is not None:
-                detailsResult = await detailsTask
-                detailsResults.append(detailsResult)
-            else:
-                detailsResults.append(None)
-        # Obtain place photo names from details
-        placePhotoNames = []
-        for detailsResult in detailsResults:
-            if detailsResult is not None:
-                placePhotoNames.append(detailsResult['photos'][0]['name'])
-            else:
-                placePhotoNames.append('N/A')
-       
-        # Fetch place photo uris from photo names
-        for placePhotoName in placePhotoNames:
-            if placePhotoName is not 'N/A':
-                photoTask = getPlacePhotoFromPhotoName(client, placePhotoName)
-                photoTasks.append(photoTask)
-            else:
-                photoTasks.append(None)
-        # Await all photo tasks
-        photoResults = []
-        for photoTask in photoTasks:
-            if photoTask is not None:
-                photoResult = await photoTask
-                photoResults.append(photoResult)
-            else:
-                photoResults.append(None)
-        
-        # Compile all results
-        results = []
-        for geocodeResult, autoCompleteResult, detailsResult, photoResult in zip(geocodeResults, autoCompleteResults, detailsResults, photoResults):
-            result = {
-                "initialPlaceId": geocodeResult['placeId'],
-                "coordinates": geocodeResult['coordinates'],
-                "placePrediction": autoCompleteResult,
-                "photoUri": photoResult,
-                "details": detailsResult
-            }
-            results.append(result)
-    return results
+                # Skip if no autocomplete result
+                if autoCompleteResult is None:
+                    results.append(result)
+                    continue
+
+                # Get place details
+                detailsResult = await getPlaceDetailsFromId(client, autoCompleteResult['precisePlaceId'])
+                
+                # Update result with place details
+                result['placePrediction'] = autoCompleteResult
+                result['details'] = detailsResult
+
+                # Get photo if available
+                if detailsResult and detailsResult.get('photos'):
+                    try:
+                        photoName = detailsResult['photos'][0]['name']
+                        photoResult = await getPlacePhotoFromPhotoName(client, photoName)
+                        result['photoUri'] = photoResult
+                    except Exception as e:
+                        print(f"Error fetching photo: {str(e)}")
+                        # Continue without photo if there's an error
+
+                results.append(result)
+
+            except Exception as e:
+                print(f"Error processing place details: {str(e)}")
+                # Add result with basic info if there's an error
+                results.append({
+                    "initialPlaceId": geocodeResult.get('placeId'),
+                    "coordinates": geocodeResult.get('coordinates'),
+                    "placePrediction": autoCompleteResult if autoCompleteResult else None,
+                    "photoUri": None,
+                    "details": None
+                })
+
+        # Check if airport for each place
+        for place in results:
+            checkIfAirport(place)
+
+        return results
 
 
 async def getCoordinatesGoogle(client, address):
-    print(f"Address: {address}")
-    googleAPIKey = os.getenv("GOOGLE_API_KEY")
-    
-    # URL encode the address
-    encoded_address = urllib.parse.quote(address)
-    geocodeUrl = f"https://maps.googleapis.com/maps/api/geocode/json?address={encoded_address}&key={googleAPIKey}"
-    
+    if not address:
+        print("Empty address provided")
+        return None
+        
     try:
+        googleAPIKey = os.getenv("GOOGLE_API_KEY")
+        if not googleAPIKey:
+            raise ValueError("Google API key not found")
+            
+        encoded_address = urllib.parse.quote(address)
+        geocodeUrl = f"https://maps.googleapis.com/maps/api/geocode/json?address={encoded_address}&key={googleAPIKey}"
+        
         response = await client.get(geocodeUrl)
-        if response.status_code == 200:
-            data = response.json()
-            if data["results"]:
-                location = data["results"][0]["geometry"]["location"]
-                placeId = data["results"][0]["place_id"]
-                return {
-                    "coordinates": {
-                        "latitude": location["lat"],
-                        "longitude": location["lng"]
-                    },
-                    "placeId": placeId,
-                }
-            else:
-                print(f"No results found for address: {address}")
-                return None
-        else:
-            print(f"Error fetching coordinates for address {address}: {response.text}")
+        response.raise_for_status()  # Raises exception for 4XX/5XX status codes
+        
+        data = response.json()
+        if not data.get("results"):
+            print(f"No results found for address: {address}")
             return None
+            
+        location = data["results"][0]["geometry"]["location"]
+        return {
+            "coordinates": {
+                "latitude": location["lat"],
+                "longitude": location["lng"]
+            },
+            "placeId": data["results"][0]["place_id"]
+        }
+            
     except Exception as e:
-        print(f"Exception occurred while fetching coordinates for address {address}: {e}")
+        print(f"Error in getCoordinatesGoogle for address {address}: {str(e)}")
         return None
 
 # Get precise place ID from Google Autocomplete API 
 async def getPlaceFromAutocomplete(client, input, coordinates):
-    initialRadius = 5000
-    maxRadius = 20000
-    increment = 5000
-
-    apiKey = os.getenv("GOOGLE_API_KEY")
-    autocompleteUrl = "https://places.googleapis.com/v1/places:autocomplete"
-    headers = {
-        'Content-Type': 'application/json',
-        'X-Goog-Api-Key': apiKey,
-        'X-Goog-FieldMask': "*"
-    }
-    
-    """ body = {
-        "input": input,
-    }
- """
-    radius = initialRadius
-    while radius <= maxRadius:
-        body = {
-            "input": input,
-            "locationRestriction": {
-                "circle": {
-                    "center": {
-                        "latitude": coordinates['latitude'],
-                        "longitude": coordinates['longitude']
-                    },
-                "radius": radius
+    if not input or not coordinates:
+        return None
+        
+    try:
+        apiKey = os.getenv("GOOGLE_API_KEY")
+        if not apiKey:
+            raise ValueError("Google API key not found")
+            
+        headers = {
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': apiKey,
+            'X-Goog-FieldMask': "*"
+        }
+        
+        # Try with location restriction first
+        for radius in range(5000, 25000, 5000):
+            body = {
+                "input": input,
+                "locationRestriction": {
+                    "circle": {
+                        "center": coordinates,
+                        "radius": radius
+                    }
                 }
             }
-        }
-
-        response = await client.post(autocompleteUrl, headers=headers, json=body)
-        if response.status_code == 200 and response.content:
-            try:
-                data = response.json()
-            except Exception as e:
-                print(f"Exception occurred while parsing JSON response: {e}")
-                radius += increment
-                continue
-            # Check if suggestions key exists
-            suggestions = data.get('suggestions', [])
-            if suggestions:
-                prediction = suggestions[0]["placePrediction"]
+            
+            response = await client.post(
+                "https://places.googleapis.com/v1/places:autocomplete",
+                headers=headers,
+                json=body
+            )
+            response.raise_for_status()
+            
+            data = response.json()
+            if data.get('suggestions'):
+                prediction = data['suggestions'][0]["placePrediction"]
                 return {
                     "precisePlaceId": prediction["placeId"],
                     "text": prediction['text']['text']
                 }
-            else:
-                print(f"No results found for query {input} with radius: {radius}m")
-                radius += increment
-        else:
-            print(f"Error fetching results for query {input}: {response.text}")
-            break
-
-    # Attempt without location restriction 
-    body = {
-        "input": input,
-    }
-
-    response = await client.post(autocompleteUrl, headers=headers, json=body)
-    print(f"FALLBACK: Attempting input {input} with no coordinates")
-    if response.status_code == 200:
-        try:
-            data = response.json()
-        except Exception as e:
-            print(f"Exception occurred while parsing JSON response in fallback: {e}")
-            return None
-        # Check if suggestions key exists
-        suggestions = data.get('suggestions', [])
-        if suggestions:
-            prediction = suggestions[0]["placePrediction"]
+                
+        # Fallback without location restriction
+        response = await client.post(
+            "https://places.googleapis.com/v1/places:autocomplete",
+            headers=headers,
+            json={"input": input}
+        )
+        response.raise_for_status()
+        
+        data = response.json()
+        if data.get('suggestions'):
+            prediction = data['suggestions'][0]["placePrediction"]
             return {
                 "precisePlaceId": prediction["placeId"],
                 "text": prediction['text']['text']
             }
-        else:
-            print(f"No results found for query {input} with no radius restriction.")
-            return None
-    else:
-        print(f"Error fetching fallback results for query {input}: {response.text}")
+            
+        return None
+            
+    except Exception as e:
+        print(f"Error in getPlaceFromAutocomplete for input {input}: {str(e)}")
         return None
     
 # Get place details from Google Place Details API using Place ID
@@ -256,7 +245,6 @@ async def getPlacePhotoFromPhotoName(client, photoName):
         if response.status_code == 200:
             result = response.json()
             if result is not None:
-                print(f"Photo Uri:{result.get("photoUri")}")
                 return {
                     "photoDetails": result.get("photoUri")
                 }

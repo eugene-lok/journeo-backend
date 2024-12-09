@@ -320,6 +320,11 @@ async def chatResponse(message: ChatRequest):
             
             # Process places and calculate routes
             places = await processItineraryPlaces(itineraryContent)
+            if not places:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Unable to process location details"
+            )
 
             # Merge place details and routes into itinerary content
             mergedItinerary = await mergePlaceDetailsIntoItinerary(itineraryContent, places)
@@ -334,8 +339,11 @@ async def chatResponse(message: ChatRequest):
 
             return JSONResponse(content={"response": responseData})
 
-        except json.JSONDecodeError as e:
-            raise HTTPException(status_code=500, detail=f"Failed to decode JSON: {str(e)}")
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error processing request: {str(e)}"
+            )
             
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
