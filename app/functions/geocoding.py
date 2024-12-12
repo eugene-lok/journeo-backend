@@ -195,7 +195,7 @@ async def getPlaceFromAutocomplete(client, input, coordinates):
 # Get place details from Google Place Details API using Place ID
 async def getPlaceDetailsFromId(client, placeId):
     googleAPIKey = os.getenv("GOOGLE_API_KEY")
-    fields = "id,displayName,primaryType,primaryTypeDisplayName,types,websiteUri,googleMapsUri,internationalPhoneNumber,nationalPhoneNumber,containingPlaces,regularOpeningHours,priceLevel,ratings,userRatingCount,photos"
+    fields = "id,displayName,primaryType,primaryTypeDisplayName,types,websiteUri,googleMapsUri,internationalPhoneNumber,nationalPhoneNumber,containingPlaces,regularOpeningHours,priceLevel,rating,userRatingCount,photos"
     headers = {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': googleAPIKey,
@@ -221,7 +221,7 @@ async def getPlaceDetailsFromId(client, placeId):
                     "nationalPhoneNumber": result.get("nationalPhoneNumber"),
                     "regularOpeningHours": result.get("regularOpeningHours"),
                     "priceLevel": result.get("priceLevel"),
-                    "ratings": result.get("ratings"),
+                    "rating": result.get("rating"),
                     "userRatingCount": result.get("userRatingCount"),
                     "photos": result.get("photos"),
                 }

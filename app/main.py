@@ -16,9 +16,9 @@ from functools import wraps
 
 from app.models import UserItinerary, UserMessage
 from app.middleware import addCorsMiddleware
-from app.mapboxRoutes import getRouteFromMapbox
 from app.loggerConfig import logger
 from app.functions.geocoding import *
+from app.functions.mapboxRoutes import getRouteFromMapbox
 from app.extractorAgent import createTravelPreferenceWorkflow
 
 import os
