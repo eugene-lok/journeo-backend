@@ -28,6 +28,36 @@ ENTITY_DESCRIPTIONS = {
     'includesPets': 'Are you traveling with pets?'
 }
 
+responseFormat = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "extractionResults",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "entities": {
+                    "type": "object",
+                    "properties": {
+                        "destinations": {"type": "string"},
+                        "budget": {"type": "string"},
+                        "duration": {"type": "string"},
+                        "numTravellers": {"type": "string"},
+                        "startDate": {"type": "string"},
+                        "includesChildren": {"type": "boolean"},
+                        "includesPets": {"type": "boolean"},
+                    },
+                    "required": ["destinations", "budget", "duration","numTravellers","startDate","includesChildren","includesPets"],
+                    "additionalProperties": False
+                },
+                "clarificationMessage": {"type": "string"},
+            },
+            "required": ["entities","clarificationMessage"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
+}
+
 # Entity extraction system prompt
 ENTITY_EXTRACTION_PROMPT = PromptTemplate(
     input_variables=["userInput", "previousEntities"],
@@ -60,19 +90,15 @@ ENTITY_EXTRACTION_PROMPT = PromptTemplate(
     If previous entities had "destinations": "London", and new input doesn't mention destinations,
     do NOT ask about destinations in the clarification message since it's already known.
 
-    Reply with this JSON structure:
-    {{
-        "entities": {{
-            "destinations": "extracted destination or null",
-            "budget": "extracted budget or null",
-            "duration": "extracted duration or null",
-            "numTravellers": "extracted number or null",
-            "startDate": "extracted date or null",
-            "includesChildren": "true/false or null",
-            "includesPets": "true/false or null"
-        }},
-        "clarificationMessage": "Ask ONLY about truly missing information (not found in either previous OR new entities). If ALL entities are accounted for when combining previous and new, return an empty string."
-    }}
+    OUTPUT RULES:
+    "destinations": "extracted destination or null",
+    "budget": "extracted budget or null",
+    "duration": "extracted duration or null",
+    "numTravellers": "extracted number or null",
+    "startDate": "extracted date or null",
+    "includesChildren": "true/false or null",
+    "includesPets": "true/false or null"
+    "clarificationMessage": "If ANY entities are missing after combining previous and new, provide a question about the missing information. If ALL entities are complete, this MUST be an empty string.",
     """
 )
 
@@ -117,6 +143,7 @@ def extractEntities(state: TravelPreferenceState, config):
         timeout=None,
         max_retries=2,
         api_key=os.getenv("OPENAI_API_KEY"),
+        response_format = responseFormat
     )
     
     # Get user input and previous entities from state
@@ -131,6 +158,8 @@ def extractEntities(state: TravelPreferenceState, config):
         userInput=userInput,
         previousEntities=previousEntitiesStr
     )
+    #print(userInput)
+    #print(f"Prompt:{prompt}")
     
     try:
         # Get LLM response

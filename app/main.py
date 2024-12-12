@@ -16,9 +16,9 @@ from functools import wraps
 
 from app.models import UserItinerary, UserMessage
 from app.middleware import addCorsMiddleware
-from app.mapboxRoutes import getRouteFromMapbox
 from app.loggerConfig import logger
-from app.geoTools.geocoding import *
+from app.functions.geocoding import *
+from app.functions.mapboxRoutes import getRouteFromMapbox
 from app.extractorAgent import createTravelPreferenceWorkflow
 
 import os
@@ -172,12 +172,10 @@ async def extractTravelPreferences(inputData: UserInputModel):
             "extractedEntities": result.get('extractedEntities', {}),
             "missingEntities": result.get('missingEntities', []),
             "isComplete": result.get('isComplete', False),
-            "clarificationMessage": result.get('clarificationMessage', "")
+            "clarificationMessage": result.get('clarificationMessage', ""),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
 
 responseFormat = {
     "type": "json_schema",
@@ -211,9 +209,10 @@ responseFormat = {
                         "additionalProperties": False                       
                     }              
                 },
-                "budgetBreakdown": {"type": "string"}
+                "budgetBreakdown": {"type": "string"},
+                "completionMessage": {"type": "string"}
             },
-            "required": ["days", "budgetBreakdown"],
+            "required": ["days", "budgetBreakdown", "completionMessage"],
             "additionalProperties": False
         },
         "strict": True,
@@ -233,26 +232,39 @@ llm = ChatOpenAI(
 ## Implement different budget options, don't have to ask for budget
 
 systemPromptShort = (
-    f"You are a travel agent. Your job is to generate a complete itinerary based on these parameters:"
-    f"- **Trip duration** (phrased as 'X days', 'X-day trip', 'a week', or 'from date A to date B').\n"
-    f"- **Trip origin** (phrased as 'from X', 'starting in X', or 'origin is X').\n"
-    f"- **Trip destination** (phrased as 'to X', 'destination is X', or 'visit X').\n"
-    f"- **Number of travellers** (phrased as 'for X people', 'with X people', 'X people going', 'alone', or 'solo').\n"
-    f"- **Trip budget** (phrased as '$X', 'a budget of X', or 'around X').\n\n"
-    f"IMPORTANT NAMING RULES:\n"
-    f"1. For place names, use ONLY the official establishment name without any additional words or context:\n"
-    f"   ✓ CORRECT: 'Calgary International Airport'\n"
-    f"   ✗ INCORRECT: 'Departure from Calgary International Airport'\n"
-    f"   ✓ CORRECT: 'The Ritz-Carlton'\n"
-    f"   ✗ INCORRECT: 'Check-in at The Ritz-Carlton'\n\n"
-    f"2. For restaurants and dining establishments, use ONLY the restaurant name:\n"
-    f"   ✓ CORRECT: 'Charcut Roast House'\n"
-    f"   ✗ INCORRECT: 'Dinner at Charcut Roast House'\n\n"
+    f"You are a travel agent. Your job is to generate a complete itinerary based on the parameters given by the user."
+
+    f"CRITICAL PLACE NAMING RULES:\n"
+    f"1. Place names MUST be ONLY the official establishment or venue name:\n"
+    f"   CORRECT: 'Museum of Modern Art'\n"
+    f"   INCORRECT: 'Visit Museum of Modern Art'\n"
+    f"   INCORRECT: 'Morning at Museum of Modern Art'\n"
+    f"   INCORRECT: 'Back to Hotel'\n\n"
+    
+    f"2. Never include actions, times, or instructions in place names:\n"
+    f"   CORRECT: 'Central Station'\n"
+    f"   INCORRECT: 'Depart from Central Station'\n"
+    f"   INCORRECT: 'Morning Coffee'\n"
+    f"   INCORRECT: 'Walk to Park'\n\n"
+    
     f"3. Every address MUST be an exact, real address. Do not use placeholders or approximate locations.\n\n"
-    f"4. Activities and context should be included in the description field, NOT in the name field.\n"
-    f"   Example description: 'Departing flight from this major international airport serving Calgary.'\n\n"
-    f" Use present tense in each daySummary. Use a neutral, directive style appropriate for itineraries. Do not use future tense.\n"
-    f"In your budgetBreakdown in your response, include a comprehensive description of how the budget is distributed throughout the trip."
+    
+    f"4. Put all activities, timing, and instructions in the description field ONLY:\n"
+    f"   Name: 'Pike Place Market'\n"
+    f"   Description: 'Start your morning exploring this historic market. Sample local delicacies and watch fish-throwing demonstrations.'\n\n"
+    
+    f"5. Names must be actual physical locations that can be found on Google Maps:\n"
+    f"   CORRECT: 'Space Needle'\n"
+    f"   INCORRECT: 'Lunch Break'\n"
+    f"   INCORRECT: 'Free Time'\n"
+    f"   INCORRECT: 'Return Journey'\n\n"
+
+    f" Use present tense in each daySummary. Use imperative writing appropriate for itineraries. Do not use future tense.\n"
+    f"In your budgetBreakdown in your response, include a comprehensive description of how the budget is distributed throughout the trip.\n"
+    f"Your completionMessage should provide a brief completion message that:\n"
+    f"   - Acknowledges the itinerary is ready\n"
+    f"   - Names the main destination(s)\n"
+    f"   - Encourages the user to explore the map\n"
 )
 
 systemMessage = SystemMessagePromptTemplate.from_template(systemPromptShort)
@@ -317,27 +329,58 @@ async def chatResponse(message: ChatRequest):
             
             # Process places and calculate routes
             places = await processItineraryPlaces(itineraryContent)
-            print(f"Places: {places}")
-            routes = await calculateRoutes(places)
+            if not places:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Unable to process location details"
+            )
 
-            # Ensure same sessionId that was returned
+            # Merge place details and routes into itinerary content
+            mergedItinerary = await mergePlaceDetailsIntoItinerary(itineraryContent, places)
+            finalItinerary = await calculateDailyRoutes(mergedItinerary)
+
+            # Format response
             responseData = {
                 "sessionId": sessionId,  
-                "itinerary": itineraryContent,
+                "itinerary": finalItinerary,
                 "places": places,
-                "routes": routes
             }
 
             return JSONResponse(content={"response": responseData})
 
-        except json.JSONDecodeError as e:
-            raise HTTPException(status_code=500, detail=f"Failed to decode JSON: {str(e)}")
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error processing request: {str(e)}"
+            )
             
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
+async def mergePlaceDetailsIntoItinerary(itineraryContent, places):
+    # Create map of name and address to place details
+    placeDetailsMap = {
+        (place["name"], place["address"]): {
+            key: value for key, value in place.items() 
+            if key not in ["name", "address"]
+        }
+        for place in places
+    }
+    
+    # Iterate through each day and place in itinerary
+    for day in itineraryContent["days"]:
+        for place in day["places"]:
+            # Look up details using name and address as key
+            details = placeDetailsMap.get((place["name"], place["address"]), {})
+            # Update place with place details
+            place.update(details)
+    
+    return itineraryContent    
+    
 async def processItineraryPlaces(itinerary_content: Dict) -> List[Dict]:
     """Extract and process place information from itinerary content."""
+
+    print(f"itineraryOnlyContent{itinerary_content}")
     names = []
     addresses = []
     for day in itinerary_content["days"]:
@@ -359,65 +402,83 @@ async def processItineraryPlaces(itinerary_content: Dict) -> List[Dict]:
             "initialPlaceId": place_info['initialPlaceId'],
             "coordinates": place_info['coordinates'],
             "predictedLocation": place_info['placePrediction'],
-            "details": place_info['details']
+            "details": place_info['details'],
+            "photoUri": place_info['photoUri']
         }
         checkIfAirport(place)
         places.append(place)
     
     return places
 
-async def calculateRoutes(places: List[Dict]) -> List[Dict]:
-    """Calculate routes between consecutive places, excluding airport-to-airport routes."""
-    routes = []
+# Obtains and generates all routes in parallel using Mapbox Route API and organize them by day 
+async def calculateDailyRoutes(itineraryContent: Dict) -> Dict:
     
-    if len(places) < 2:
-        return routes
-
-    # Create pairs of consecutive places
-    consecutive_pairs = [(places[i], places[i + 1]) for i in range(len(places) - 1)]
+    # Collect all place pairs and respective day
+    allPairs = []
+    dayIndices = []  # Keep track of which day each pair belongs to
     
-    # Filter out pairs where both are airports
-    non_airport_pairs = [
-        (from_place, to_place) for from_place, to_place in consecutive_pairs
-        if not (from_place.get("isAirport", False) and to_place.get("isAirport", False))
-    ]
-
-    async with httpx.AsyncClient() as client:
-        route_tasks = [
-            getRouteFromMapbox(
-                client,
-                startCoords=from_place["coordinates"],
-                endCoords=to_place["coordinates"]
-            )
-            for from_place, to_place in non_airport_pairs
+    for dayIndex, day in enumerate(itineraryContent["days"]):
+        places = day["places"]
+        if len(places) < 2:
+            continue
+            
+        # Create pairs of consecutive places for a day
+        dayPairs = [(places[i], places[i + 1]) 
+                    for i in range(len(places) - 1)]
+        
+        # Filter out airport-to-airport pairs
+        nonAirportPairs = [
+            (fromPlace, toPlace) for fromPlace, toPlace in dayPairs
+            if not (fromPlace.get("isAirport", False) and 
+                   toPlace.get("isAirport", False))
         ]
         
-        route_results = await asyncio.gather(*route_tasks, return_exceptions=True)
+        allPairs.extend(nonAirportPairs)
+        dayIndices.extend([dayIndex] * len(nonAirportPairs))
 
-        # Process route results
-        for (from_place, to_place), result in zip(non_airport_pairs, route_results):
+    # Calculate all routes in parallel
+    async with httpx.AsyncClient() as client:
+        routeTasks = [
+            getRouteFromMapbox(
+                client,
+                startCoords=fromPlace["coordinates"],
+                endCoords=toPlace["coordinates"]
+            )
+            for fromPlace, toPlace in allPairs
+        ]
+        
+        routeResults = await asyncio.gather(*routeTasks, return_exceptions=True)
+        
+        # Initialize empty routes list for each day
+        for day in itineraryContent["days"]:
+            day["routes"] = []
+        
+        # Process results and organize by day
+        for (fromPlace, toPlace), result, dayIndex in zip(allPairs, routeResults, dayIndices):
             if isinstance(result, Exception):
-                print(f"Failed to fetch route between {from_place['name']} and {to_place['name']}: {result}")
+                print(f"Failed to fetch route between {fromPlace['name']} "
+                      f"and {toPlace['name']}: {result}")
                 continue
             
             if result:
-                routes.append({
+                route = {
                     "from": {
-                        "id": from_place["id"],
-                        "name": from_place["name"],
-                        "coordinates": from_place["coordinates"]
+                        "id": fromPlace.get("id"),
+                        "name": fromPlace["name"],
+                        "coordinates": fromPlace["coordinates"]
                     },
                     "to": {
-                        "id": to_place["id"],
-                        "name": to_place["name"],
-                        "coordinates": to_place["coordinates"]
+                        "id": toPlace.get("id"),
+                        "name": toPlace["name"],
+                        "coordinates": toPlace["coordinates"]
                     },
                     "route": result
-                })
+                }
+                itineraryContent["days"][dayIndex]["routes"].append(route)
             else:
-                print(f"No route found between {from_place['name']} and {to_place['name']}.")
-
-    return routes
+                print(f"No route found between {fromPlace['name']} "
+                      f"and {toPlace['name']}.")
+    return itineraryContent
 
 
 # Get place type and details from Google Text Search API
