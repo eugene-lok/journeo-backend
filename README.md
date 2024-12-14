@@ -3,11 +3,11 @@
 ---
 
 ## About
-This is the backend for Journeo, an LLM-based travel itinerary planner. It allows users to input their travel preferences such as budget, destinations, and duration to generate a personalized travel itinerary with OpenAI's GPT. Locations from this itinerary are displayed on an interactive map. 
+This is the backend for Journeo, an LLM-based travel itinerary planner. It allows users to chat with an LLM chatbot to generate personalized travel itinerary with OpenAI's GPT. Locations from this itinerary are displayed on an interactive map. 
 
 ### Key Features:
 - Integrates OpenAI's API for dynamic itinerary generation based on user input.
-- Utilizes Mapbox’s Geocoding API to asynchronously convert addresses to coordinates.
+- Utilizes Google's Geocoding API and Places API to asynchronously geocode and obtain details for each place generated.
 ---
 
 ## Technologies Used 

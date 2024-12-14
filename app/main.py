@@ -1,176 +1,551 @@
-from openai import OpenAI
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import JSONResponse
-from app.models import UserItinerary, UserMessage
-from app.middleware import addCorsMiddleware
-from langchain.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI
 from langchain.prompts import (
     ChatPromptTemplate,
     HumanMessagePromptTemplate,
     SystemMessagePromptTemplate,
     MessagesPlaceholder
 )
+
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
+from pydantic import BaseModel
+from datetime import datetime, timedelta
+from typing import Dict, Any, Optional, List, Union
+from functools import wraps
 
+from app.models import UserItinerary, UserMessage
+from app.middleware import addCorsMiddleware
+from app.loggerConfig import logger
+from app.functions.geocoding import *
+from app.functions.mapboxRoutes import getRouteFromMapbox
+from app.extractorAgent import createTravelPreferenceWorkflow
 
-#from app.auth import authRouter
 import os
-import re
 import httpx
 import asyncio
+import json
+import uuid
+
+
+# Configure logging
+#logging.basicConfig(level=logging.INFO)
+#logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
 # Apply CORS middleware
 addCorsMiddleware(app)
 
-# Add router
-#app.include_router(authRouter)
+class SessionData:
+    def __init__(self):
+        self.lastAccessed = datetime.now()
+        self.createdAt = datetime.now()
+        self.preferences = {}  # For travel preferences
+        self.chatHistory = []  # For chat messages
+        self.entities = {}     # For extracted entities
+
+# Session manager class
+class SessionManager:
+    def __init__(self, expirationMinutes: int = 30):
+        self._sessions: Dict[str, SessionData] = {}
+        self.expirationMinutes = expirationMinutes
+
+    def createSession(self) -> str:
+        sessionId = str(uuid.uuid4())
+        self._sessions[sessionId] = SessionData()
+        return sessionId
+
+    def getSession(self, sessionId: str) -> Optional[SessionData]:
+        session = self._sessions.get(sessionId)
+        if session:
+            session.lastAccessed = datetime.now()
+        return session
+
+    def sessionExists(self, sessionId: str) -> bool:
+        return sessionId in self._sessions
+
+    def updateSession(self, sessionId: str, updateFunc) -> None:
+        """
+        Update session using a callback function
+        """
+        if session := self.getSession(sessionId):
+            updateFunc(session)
+
+    def cleanupExpiredSessions(self) -> None:
+        currentTime = datetime.now()
+        expired = [
+            sessionId for sessionId, data in self._sessions.items()
+            if (currentTime - data.lastAccessed) > timedelta(minutes=self.expirationMinutes)
+        ]
+        for sessionId in expired:
+            del self._sessions[sessionId]
+
+# Create global session manager
+sessionManager = SessionManager()
+
+# Base model for requests that include sessionId
+class SessionRequest(BaseModel):
+    sessionId: Optional[str] = None
+
+# Dependency for session management
+async def getOrCreateSession(sessionRequest: SessionRequest) -> tuple[str, SessionData]:
+    """
+    FastAPI dependency that either gets an existing session or creates a new one
+    """
+    sessionManager.cleanupExpiredSessions()
+    
+    sessionId = sessionRequest.sessionId
+    if not sessionId or not sessionManager.sessionExists(sessionId):
+        sessionId = sessionManager.createSession()
+    
+    session = sessionManager.getSession(sessionId)
+    if not session:
+        raise HTTPException(status_code=500, detail="Failed to create or retrieve session")
+    
+    return sessionId, session
+
+# Updated request models
+class UserMessage(SessionRequest):
+    input: Union[str, Dict] 
+
+class UserInputModel(SessionRequest):
+    userInput: str
+
+class ChatRequest(BaseModel):
+    sessionId: str
+    entities: Dict[str, Any]  
+
+@app.post("/api/validate-session/")
+async def validateSession(sessionRequest: SessionRequest):
+    try:
+        sessionId = sessionRequest.sessionId
+        if not sessionId:
+            return JSONResponse(status_code=404, content={"valid": False})
+
+        session = sessionManager.getSession(sessionId)
+        if not session:
+            return JSONResponse(status_code=404, content={"valid": False})
+
+        # Check if session has expired
+        currentTime = datetime.now()
+        if (currentTime - session.lastAccessed) > timedelta(minutes=sessionManager.expirationMinutes):
+            # Clean up expired session
+            del sessionManager._sessions[sessionId]
+            return JSONResponse(status_code=404, content={"valid": False})
+
+        return JSONResponse(content={"valid": True})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/clear-session/")
+async def clearSession(sessionRequest: SessionRequest):
+    try:
+        sessionId = sessionRequest.sessionId
+        if sessionId and sessionId in sessionManager._sessions:
+            del sessionManager._sessions[sessionId]
+        return JSONResponse(content={"status": "success"})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+workflow = createTravelPreferenceWorkflow()   
+
+@app.post("/api/extract-preferences/")
+async def extractTravelPreferences(inputData: UserInputModel):
+    try:
+        sessionId, session = await getOrCreateSession(inputData)  # Pass the inputData directly
+        
+        config = {"configurable": {"thread_id": f"pref_{sessionId}"}}
+        
+        initialInput = {
+            'userInput': inputData.userInput,
+            'previousEntities': session.entities
+        }
+        
+        result = workflow.invoke(initialInput, config=config)
+        
+        # Update session entities
+        session.entities = result.get('extractedEntities', {})
+        
+        return {
+            "sessionId": sessionId,
+            "extractedEntities": result.get('extractedEntities', {}),
+            "missingEntities": result.get('missingEntities', []),
+            "isComplete": result.get('isComplete', False),
+            "clarificationMessage": result.get('clarificationMessage', ""),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+responseFormat = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "itinerary",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "day": {"type": "integer"},
+                            "places": {
+                                "type": "array",
+                                "items": {  
+                                    "type": "object",
+                                    "properties": {
+                                        "name": { "type": "string" },
+                                        "address": { "type": "string" },
+                                        "description": { "type": "string" },
+                                    },
+                                    "required": ["name", "address", "description"],
+                                    "additionalProperties": False
+                                }
+                            },
+                            "summaryOfDay": {"type": "string"}
+                        },
+                        "required": ["day","places","summaryOfDay"],
+                        "additionalProperties": False                       
+                    }              
+                },
+                "budgetBreakdown": {"type": "string"},
+                "completionMessage": {"type": "string"}
+            },
+            "required": ["days", "budgetBreakdown", "completionMessage"],
+            "additionalProperties": False
+        },
+        "strict": True,
+    }
+}
 
 llm = ChatOpenAI(
     model="gpt-4o-mini",
-    temperature=0.7,
-    max_tokens=1000,
+    temperature=0.5,
+    max_tokens=1500,
     timeout=None,
     max_retries=2,
-    api_key=os.getenv("OPENAI_API_KEY")
+    api_key=os.getenv("OPENAI_API_KEY"),
+    response_format=responseFormat
 )
 
-systemPrompt = (
-    f"You are a travel agent. Your job is to generate a complete itinerary based on the user’s input. "
-    f"Your goal is to gather the following information from the user:\n"
-    f"- **Trip duration** (phrased as 'X days', 'X-day trip', 'a week', or 'from date A to date B').\n"
-    f"- **Trip origin** (phrased as 'from X', 'starting in X', or 'origin is X').\n"
-    f"- **Trip destination** (phrased as 'to X', 'destination is X', or 'visit X').\n"
-    f"- **Number of travellers** (phrased as 'for X people, 'with X people', or 'X people going').\n"
-    f"- **Trip budget** (phrased as '$X', 'a budget of X', or 'around X').\n\n"
+## Implement different budget options, don't have to ask for budget
 
-    f"### Duration Handling:\n"
-    f"**If the user specifies the duration in any form (e.g., 'X days', 'a week', or a range like 'from date A to date B'), assume the duration is complete and do not ask for it again.**\n\n"
+systemPromptShort = (
+    f"You are a travel agent. Your job is to generate a complete itinerary based on the parameters given by the user."
 
-    f"### Origin Handling:\n"
-    f"**If the user specifies the origin with phrases like 'from X', 'starting in X', or 'origin is X', assume the origin is complete and do not ask for it again.**\n\n"
-
-    f"### Destination Handling:\n"
-    f"**If the user specifies the destination with phrases like 'to X', 'destination is X', or 'visit X', assume the destination is complete and do not ask for it again.**\n\n"
-
-    f"### Number of Travellers Handling:\n"
-    f"**If the user specifies the number of travellers with phrases like 'for X people, 'with X people', or 'X people going', assume the number of travellers is complete and do not ask for it again.**\n\n"
-
-    f"### Budget Handling:\n"
-    f"**If the user specifies the budget with phrases like '$X', 'a budget of X', or 'around X', assume the budget is complete and do not ask for it again.**\n\n"
-
-    f"### Handling Changes:\n"
-    f"- **If the user requests a change to their itinerary, do not reclarify all parameters unless explicitly asked to.**\n"
-    f"- **First, ask the user: 'Would you like to keep the rest of the trip the same?'**\n"
-    f"- If the user wants to keep the rest of the trip the same, make only the requested change and regenerate the itinerary.\n"
-    f"- If the user wants to modify other aspects, clarify only the specific parameters they want to change and retain the rest of the inputs.\n\n"
-
-    f"### Completion Handling:\n"
-    f"Once the user provides all five parameters (trip duration, origin, destination, number of travellers, and budget), you must generate the itinerary immediately without asking further questions or clarifying anything. "
-    f"Do not delay generating the itinerary once all the information has been gathered. Generate the itinerary only when all information has been gathered.\n\n"
-
-    f"### Itinerary Format:\n"
-    f"1. Title it 'Your Itinerary'. **This is mandatory. Do not use this phrase elsewhere.**\n"
-    f"2. Organize the itinerary by days. The first and last days are for travel:\n"
-    f"   - First day: Travel from the origin to the destination.\n"
-    f"   - Last day: Travel back from the destination to the origin.\n"
-    f"3. For each location you suggest, use the following mandatory format. Recommend at least 2 locations per day unless the single location will take a full day to visit:\n"
-    f"   - **Name:** [Always start with this]\n"
-    f"   - **Address:** [This must be on a new line]\n"
-    f"   - **Description:** [Provide a brief description]\n\n"
-    f"After the itinerary, include a 'Budget Breakdown' section.\n\n"
-    f"Under no circumstances should you:\n"
-    f"- Ask for additional information or preferences after all inputs are received.\n"
-    f"- Delay generating the itinerary."
-)
-
-
-systemMessage = SystemMessagePromptTemplate.from_template(systemPrompt)
-messageHistory = MessagesPlaceholder(variable_name="messages")
-messagesList = []
+    f"CRITICAL PLACE NAMING RULES:\n"
+    f"1. Place names MUST be ONLY the official establishment or venue name:\n"
+    f"   CORRECT: 'Museum of Modern Art'\n"
+    f"   INCORRECT: 'Visit Museum of Modern Art'\n"
+    f"   INCORRECT: 'Morning at Museum of Modern Art'\n"
+    f"   INCORRECT: 'Back to Hotel'\n\n"
     
+    f"2. Never include actions, times, or instructions in place names:\n"
+    f"   CORRECT: 'Central Station'\n"
+    f"   INCORRECT: 'Depart from Central Station'\n"
+    f"   INCORRECT: 'Morning Coffee'\n"
+    f"   INCORRECT: 'Walk to Park'\n\n"
+    
+    f"3. Every address MUST be an exact, real address. Do not use placeholders or approximate locations.\n\n"
+    
+    f"4. Put all activities, timing, and instructions in the description field ONLY:\n"
+    f"   Name: 'Pike Place Market'\n"
+    f"   Description: 'Start your morning exploring this historic market. Sample local delicacies and watch fish-throwing demonstrations.'\n\n"
+    
+    f"5. Names must be actual physical locations that can be found on Google Maps:\n"
+    f"   CORRECT: 'Space Needle'\n"
+    f"   INCORRECT: 'Lunch Break'\n"
+    f"   INCORRECT: 'Free Time'\n"
+    f"   INCORRECT: 'Return Journey'\n\n"
+
+    f" Use present tense in each daySummary. Use imperative writing appropriate for itineraries. Do not use future tense.\n"
+    f"In your budgetBreakdown in your response, include a comprehensive description of how the budget is distributed throughout the trip.\n"
+    f"Your completionMessage should provide a brief completion message that:\n"
+    f"   - Acknowledges the itinerary is ready\n"
+    f"   - Names the main destination(s)\n"
+    f"   - Encourages the user to explore the map\n"
+)
+
+systemMessage = SystemMessagePromptTemplate.from_template(systemPromptShort)
+messageHistory = MessagesPlaceholder(variable_name="messages")
+messagesList = []    
+
 @app.post("/api/chat/")
-async def chatResponse(message: UserMessage):
-
+async def chatResponse(message: ChatRequest):
     try:
-        humanMessage = HumanMessagePromptTemplate.from_template("{input}")
+        print(f"Raw message received: {message}")
+        sessionId, session = await getOrCreateSession(message)
         
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                systemMessage, 
-                humanMessage,
-                messageHistory           
-            ]
+        # Get stored entities from session
+        stored_entities = session.entities
+        print(f"Stored entities from session: {stored_entities}")
+
+        # Prepare the chat prompt
+        humanMessage = HumanMessagePromptTemplate.from_template("{input}")
+        prompt = ChatPromptTemplate.from_messages([
+            systemMessage,
+            humanMessage,
+            messageHistory
+        ])
+
+        # Use stored entities if available, otherwise use input
+        # Use entities directly without checking if it's a dict
+        entities = stored_entities if stored_entities else message.entities
+        formatted_input = (
+            f"Please create an itinerary for {entities.get('duration', 'N/A')} "
+            f"in {entities.get('destinations', 'N/A')} "
+            f"for {entities.get('numTravellers', '1')} traveler(s) "
+            f"with a budget of {entities.get('budget', 'N/A')}. "
+            f"Start date: {entities.get('startDate', 'N/A')}. "
+            f"{'Includes children. ' if entities.get('includesChildren') == 'true' else ''}"
+            f"{'Includes pets. ' if entities.get('includesPets') == 'true' else ''}"
         )
 
-        # Add human message in message list
-        messagesList.append(HumanMessage(content=message.input))
-
-        # Generate the response using the chain
+        print(f"Formatted input for LLM: {formatted_input}")
+        
+        session.chatHistory.append(HumanMessage(content=str(formatted_input)))
+        
         chain = prompt | llm
+        response = chain.invoke({
+            "input": formatted_input,
+            "messages": session.chatHistory
+        })
 
-        response = chain.invoke(
-            {
-                "input": message.input, 
-                "messages": messagesList
-            }
-        )
 
-        itineraryContent = response.content
+        if not response.content or not response.content.strip():
+            raise HTTPException(status_code=500, detail="Empty or null JSON response.")
 
-        # Store response in message list
-        messagesList.append(AIMessage(content=response.content))
+        try:
+            itineraryContent = json.loads(response.content)
+            
+            # Validate itinerary structure
+            for day in itineraryContent.get("days", []):
+                if "day" not in day or "places" not in day or not isinstance(day["places"], list):
+                    raise HTTPException(status_code=500, detail="Missing or invalid structure in 'days' element.")
 
-        # Check if the response contains the itinerary
-        if "Your Itinerary" in itineraryContent:
-            # Extract itinerary content from response
-            print(f"content {itineraryContent}")
+            # Store response in session chat history
+            session.chatHistory.append(AIMessage(content=response.content))
+            
+            # Process places and calculate routes
+            places = await processItineraryPlaces(itineraryContent)
+            if not places:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Unable to process location details"
+            )
 
-            # Find all names in response
-            namePattern = r"\*\*Name:\*\*\s(.*?)(?=\n)"
-            names: list[str] = re.findall(namePattern, itineraryContent)
+            # Merge place details and routes into itinerary content
+            mergedItinerary = await mergePlaceDetailsIntoItinerary(itineraryContent, places)
+            finalItinerary = await calculateDailyRoutes(mergedItinerary)
 
-            # Find all addresses in response
-            addressPattern = r"\*\*Address:\*\*\s(.*?)(?=\n)"
-            addresses: list[str] = re.findall(addressPattern, itineraryContent)
-
-            # Get coordinates of addresses
-            coordinates = await geocodeLocations(addresses)
-
-            # Places
-            places = []
-
-            # Assign attributes to each place
-            for id, (name, address, coordinate) in enumerate(zip(names, addresses, coordinates)):
-                place = {
-                    "id": id,
-                    "name": name,
-                    "address": address,
-                    "coordinates": coordinate
-                }
-                places.append(place)
-
-            # Prepare response data
+            # Format response
             responseData = {
-                "itinerary": itineraryContent,
-                "places": places
+                "sessionId": sessionId,  
+                "itinerary": finalItinerary,
+                "places": places,
             }
 
-            print(responseData)
-            # Return formatted response
-            botResponse = {"response": responseData}
-            return JSONResponse(content=botResponse)
+            return JSONResponse(content={"response": responseData})
 
-        # Return raw response 
-        botResponse = {"response": response.content}
-        return JSONResponse(content=botResponse)
-
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error processing request: {str(e)}"
+            )
+            
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
+async def mergePlaceDetailsIntoItinerary(itineraryContent, places):
+    # Create map of name and address to place details
+    placeDetailsMap = {
+        (place["name"], place["address"]): {
+            key: value for key, value in place.items() 
+            if key not in ["name", "address"]
+        }
+        for place in places
+    }
+    
+    # Iterate through each day and place in itinerary
+    for day in itineraryContent["days"]:
+        for place in day["places"]:
+            # Look up details using name and address as key
+            details = placeDetailsMap.get((place["name"], place["address"]), {})
+            # Update place with place details
+            place.update(details)
+    
+    return itineraryContent    
+    
+async def processItineraryPlaces(itinerary_content: Dict) -> List[Dict]:
+    """Extract and process place information from itinerary content."""
+
+    print(f"itineraryOnlyContent{itinerary_content}")
+    names = []
+    addresses = []
+    for day in itinerary_content["days"]:
+        for place in day["places"]:
+            names.append(place["name"])
+            addresses.append(place["address"])
+
+    # Get coordinates and googlePlaceId of addresses
+    places_info = await getAllPlaceDetails(names, addresses)
+    
+    places = []
+    # Assign attributes to each place
+    for id, (name, address, place_info) in enumerate(zip(names, addresses, places_info)):
+        place = {
+            "id": id,
+            "name": name,
+            "isAirport": None,
+            "address": address,
+            "initialPlaceId": place_info['initialPlaceId'],
+            "coordinates": place_info['coordinates'],
+            "predictedLocation": place_info['placePrediction'],
+            "details": place_info['details'],
+            "photoUri": place_info['photoUri']
+        }
+        checkIfAirport(place)
+        places.append(place)
+    
+    return places
+
+# Obtains and generates all routes in parallel using Mapbox Route API and organize them by day 
+async def calculateDailyRoutes(itineraryContent: Dict) -> Dict:
+    
+    # Collect all place pairs and respective day
+    allPairs = []
+    dayIndices = []  # Keep track of which day each pair belongs to
+    
+    for dayIndex, day in enumerate(itineraryContent["days"]):
+        places = day["places"]
+        if len(places) < 2:
+            continue
+            
+        # Create pairs of consecutive places for a day
+        dayPairs = [(places[i], places[i + 1]) 
+                    for i in range(len(places) - 1)]
+        
+        # Filter out airport-to-airport pairs
+        nonAirportPairs = [
+            (fromPlace, toPlace) for fromPlace, toPlace in dayPairs
+            if not (fromPlace.get("isAirport", False) and 
+                   toPlace.get("isAirport", False))
+        ]
+        
+        allPairs.extend(nonAirportPairs)
+        dayIndices.extend([dayIndex] * len(nonAirportPairs))
+
+    # Calculate all routes in parallel
+    async with httpx.AsyncClient() as client:
+        routeTasks = [
+            getRouteFromMapbox(
+                client,
+                startCoords=fromPlace["coordinates"],
+                endCoords=toPlace["coordinates"]
+            )
+            for fromPlace, toPlace in allPairs
+        ]
+        
+        routeResults = await asyncio.gather(*routeTasks, return_exceptions=True)
+        
+        # Initialize empty routes list for each day
+        for day in itineraryContent["days"]:
+            day["routes"] = []
+        
+        # Process results and organize by day
+        for (fromPlace, toPlace), result, dayIndex in zip(allPairs, routeResults, dayIndices):
+            if isinstance(result, Exception):
+                print(f"Failed to fetch route between {fromPlace['name']} "
+                      f"and {toPlace['name']}: {result}")
+                continue
+            
+            if result:
+                route = {
+                    "from": {
+                        "id": fromPlace.get("id"),
+                        "name": fromPlace["name"],
+                        "coordinates": fromPlace["coordinates"]
+                    },
+                    "to": {
+                        "id": toPlace.get("id"),
+                        "name": toPlace["name"],
+                        "coordinates": toPlace["coordinates"]
+                    },
+                    "route": result
+                }
+                itineraryContent["days"][dayIndex]["routes"].append(route)
+            else:
+                print(f"No route found between {fromPlace['name']} "
+                      f"and {toPlace['name']}.")
+    return itineraryContent
+
+
+# Get place type and details from Google Text Search API
+async def getPlaceDetailsFromText(client, textQuery):
+    googleAPIKey = os.getenv("GOOGLE_API_KEY")
+    # Field mask
+    fields = "places.id,places.displayName,places.formattedAddress,places.primaryType,places.googleMapsUri,places.websiteUri,places.rating,places.photos"
+    # Construct request params and body
+    textSearchUrl = "https://places.googleapis.com/v1/places:searchText"
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': googleAPIKey,
+        'X-Goog-FieldMask': fields
+    }
+    body = {
+        "textQuery": textQuery,
+    }
+    try:
+        response = await client.post(textSearchUrl, headers=headers, json=body)
+        if response.status_code == 200:
+            data = response.json()
+            #print(data)
+            if 'places' in data:
+                places = data['places']
+                results = []
+                # Map data
+                for place in places:
+                    results.append({
+                        "googlePlaceId": place["id"],
+                        "displayName": place["displayName"],
+                        "formattedAddress": place["formattedAddress"],
+                        "primaryType": place["primaryType"],
+                        "googleMapsUri": place["googleMapsUri"],
+                        "websiteUri": place["websiteUri"],
+                        "rating": place["rating"],
+                        #"photos": places['photos']
+                    })
+                #print(f"results: {results}")
+                return results
+            else:
+                print(f"No places found for query: {textQuery}")
+                return None
+        else:
+            print(f"Error fetching places for query '{textQuery}': {response.text}")
+            return None
+    except Exception as e:
+        print(f"Exception occurred while fetching places for query '{textQuery}': {e}")
+        return None
+
+# Get GeoJSON routes from Mapbox Directions API
+
+# Get lat, long from Mapbox Geocoding API 
+""" async def getCoordinates(client, address):
+    print(f"Address: {address}")
+    accessToken = os.getenv("MAPBOX_ACCESS_TOKEN")
+    geocodeUrl = f"https://api.mapbox.com/search/geocode/v6/forward?q={address}&access_token={accessToken}"
+    response = await client.get(geocodeUrl)
+    if response.status_code == 200:
+        data = response.json()
+        if data["features"]:
+            coords = data["features"][0]["geometry"]["coordinates"]
+            return {"latitude": coords[1], "longitude": coords[0]}
+        return None """
+
 
 # Generates itinerary and fetches coordinates
+"""
 @app.post("/api/generateItinerary/")
 async def generateItinerary(userItinerary: UserItinerary):
     # Prepare the prompt for the OpenAI API
@@ -223,19 +598,20 @@ async def generateItinerary(userItinerary: UserItinerary):
     addressPattern = r"\*\*Address:\*\*\s(.*?)(?=\n)"
     addresses: list[str] = re.findall(addressPattern, itineraryContent)
 
-    # Get coordinates of addresses
-    coordinates = await geocodeLocations(addresses)
+    # Get coordinates and googlePlaceId of addresses
+    googlePlaceInfo = await geocodeLocations(addresses)
 
     # Places 
     places = []
 
     # Assign attributes to each place
-    for id, (name, address, coordinate) in enumerate(zip(names, addresses, coordinates)):
+    for id, (name, address, googlePlace) in enumerate(zip(names, addresses, googlePlaceInfo)):
         place = {
             "id": id,
+            "type": "placeholder",
             "name": name,
             "address": address,
-            "coordinates": coordinate
+            "coordinates": googlePlace
         }
 
         places.append(place)
@@ -248,28 +624,5 @@ async def generateItinerary(userItinerary: UserItinerary):
 
     print(response_data)
     # Return formatted response
-    return response_data
+    return response_data """
 
-# Get lat, long from Mapbox Geocoding API 
-async def getCoordinates(client, address):
-    print(f"Address: {address}")
-    accessToken = os.getenv("MAPBOX_ACCESS_TOKEN")
-    geocodeUrl = f"https://api.mapbox.com/search/geocode/v6/forward?q={address}&access_token={accessToken}"
-    response = await client.get(geocodeUrl)
-    if response.status_code == 200:
-        data = response.json()
-        if data["features"]:
-            coords = data["features"][0]["geometry"]["coordinates"]
-            return {"latitude": coords[1], "longitude": coords[0]}
-        return None
-
-# Geocode list of addresses in parallel requests 
-async def geocodeLocations(addresses: list[str]):
-    async with httpx.AsyncClient() as client:
-        tasks = [getCoordinates(client, address) for address in addresses]
-        results = await asyncio.gather(*tasks)
-    return results
-
-# Get place types from Google Places API 
-
-# Get GeoJSON routes from Mapbox Directions API
