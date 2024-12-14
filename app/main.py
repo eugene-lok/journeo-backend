@@ -1,8 +1,5 @@
-from openai import OpenAI
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import JSONResponse
-from app.models import UserItinerary, UserMessage
-from app.middleware import addCorsMiddleware
 from langchain_openai import ChatOpenAI
 from langchain.prompts import (
     ChatPromptTemplate,
@@ -10,14 +7,26 @@ from langchain.prompts import (
     SystemMessagePromptTemplate,
     MessagesPlaceholder
 )
+
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
-from app.mapboxRoutes import getRouteFromMapbox
+from pydantic import BaseModel
+from datetime import datetime, timedelta
+from typing import Dict, Any, Optional, List, Union
+from functools import wraps
+
+from app.models import UserItinerary, UserMessage
+from app.middleware import addCorsMiddleware
 from app.loggerConfig import logger
-#from app.auth import authRouter
+from app.functions.geocoding import *
+from app.functions.mapboxRoutes import getRouteFromMapbox
+from app.extractorAgent import createTravelPreferenceWorkflow
+
 import os
-import re
 import httpx
 import asyncio
+import json
+import uuid
+
 
 # Configure logging
 #logging.basicConfig(level=logging.INFO)
@@ -28,460 +37,449 @@ app = FastAPI()
 # Apply CORS middleware
 addCorsMiddleware(app)
 
-# Add router
-#app.include_router(authRouter)
+class SessionData:
+    def __init__(self):
+        self.lastAccessed = datetime.now()
+        self.createdAt = datetime.now()
+        self.preferences = {}  # For travel preferences
+        self.chatHistory = []  # For chat messages
+        self.entities = {}     # For extracted entities
 
-llm = ChatOpenAI(
-    model="gpt-4o-mini",
-    temperature=0.7,
-    max_tokens=1500,
-    timeout=None,
-    max_retries=2,
-    api_key=os.getenv("OPENAI_API_KEY")
-)
+# Session manager class
+class SessionManager:
+    def __init__(self, expirationMinutes: int = 30):
+        self._sessions: Dict[str, SessionData] = {}
+        self.expirationMinutes = expirationMinutes
 
+    def createSession(self) -> str:
+        sessionId = str(uuid.uuid4())
+        self._sessions[sessionId] = SessionData()
+        return sessionId
 
-## Put in options for adults and kids
-## Implement different budget options, don't have to ask for budget
+    def getSession(self, sessionId: str) -> Optional[SessionData]:
+        session = self._sessions.get(sessionId)
+        if session:
+            session.lastAccessed = datetime.now()
+        return session
 
-systemPrompt = (
-    f"You are a travel agent. Your job is to generate a complete itinerary based on the user’s input. "
-    f"Your goal is to gather the following information from the user:\n"
-    f"- **Trip duration** (phrased as 'X days', 'X-day trip', 'a week', or 'from date A to date B').\n"
-    f"- **Trip origin** (phrased as 'from X', 'starting in X', or 'origin is X').\n"
-    f"- **Trip destination** (phrased as 'to X', 'destination is X', or 'visit X').\n"
-    f"- **Number of travellers** (phrased as 'for X people', 'with X people', 'X people going', 'alone', or 'solo').\n"
-    f"- **Trip budget** (phrased as '$X', 'a budget of X', or 'around X').\n\n"
+    def sessionExists(self, sessionId: str) -> bool:
+        return sessionId in self._sessions
 
-    f"### Duration Handling:\n"
-    f"**If the user specifies the duration in any form (e.g., 'X days', 'a week', or a range like 'from date A to date B'), assume the duration is complete and do not ask for it again.**\n\n"
+    def updateSession(self, sessionId: str, updateFunc) -> None:
+        """
+        Update session using a callback function
+        """
+        if session := self.getSession(sessionId):
+            updateFunc(session)
 
-    f"### Origin Handling:\n"
-    f"**If the user specifies the origin with phrases like 'from X', 'starting in X', or 'origin is X', assume the origin is complete and do not ask for it again.**\n\n"
+    def cleanupExpiredSessions(self) -> None:
+        currentTime = datetime.now()
+        expired = [
+            sessionId for sessionId, data in self._sessions.items()
+            if (currentTime - data.lastAccessed) > timedelta(minutes=self.expirationMinutes)
+        ]
+        for sessionId in expired:
+            del self._sessions[sessionId]
 
-    f"### Destination Handling:\n"
-    f"**If the user specifies the destination with phrases like 'to X', 'destination is X', or 'visit X', assume the destination is complete and do not ask for it again.**\n\n"
+# Create global session manager
+sessionManager = SessionManager()
 
-    f"### Number of Travellers Handling:\n"
-    f"**If the user specifies the number of travellers with phrases like 'for X people', 'with X people', 'X people going', 'alone', or 'solo', assume the number of travellers is complete and do not ask for it again. Interpret 'alone' or 'solo' as 1 traveller.**\n\n"
+# Base model for requests that include sessionId
+class SessionRequest(BaseModel):
+    sessionId: Optional[str] = None
 
-    f"### Budget Handling:\n"
-    f"**If the user specifies the budget with phrases like '$X', 'a budget of X', or 'around X', assume the budget is complete and do not ask for it again.**\n\n"
-
-    f"### Handling Changes:\n"
-    f"- **If the user requests a change to their itinerary, do not reclarify all parameters unless explicitly asked to.**\n"
-    f"- **First, ask the user: 'Would you like to keep the rest of the trip the same?'**\n"
-    f"  - **If the user responds affirmatively (e.g., 'Yes, keep the rest the same'), apply the requested change and regenerate the itinerary.**\n"
-    f"  - **If the user wants to modify other aspects, ask specifically which parameters they would like to change and retain the rest of the inputs.**\n"
-    f"- **Ensure that only the modified parameters are updated while others remain unchanged.**\n\n"
-
-    f"### Completion Handling:\n"
-    f"Once the user provides all five parameters (trip duration, origin, destination, number of travellers, and budget), you must generate the itinerary immediately without asking further questions or clarifying anything. "
-    f"Do not delay generating the itinerary once all the information has been gathered. Generate the itinerary only when all information has been gathered.\n\n"
-
-    f"### Itinerary Format:\n"
-    f"1. Title it 'Your Itinerary'. **This is mandatory. Do not use this phrase elsewhere.**\n"
-    f"2. Organize the itinerary by days. The first and last days are for travel:\n"
-    f"   - First day: Travel from the origin to the destination.\n"
-    f"   - Last day: Travel back from the destination to the origin.\n"
-    f"3. For each location you suggest, use the following mandatory format. Recommend at least 2 locations per day unless the single location will take a full day to visit:\n"
-    f"   - **Name:** [Always start with this.]\n"
-    f"   - **Address:** [Provide the exact, real address on a new line. Do not use placeholders like '[Your Hotel Address]']\n"
-    f"   - **Description:** [Provide a brief description]\n\n"
-    f"4. **Ensure all addresses are precise and verifiable. For known locations like airports, use their official addresses.**\n\n"
-
-    f"After the itinerary, include a 'Budget Breakdown' section.\n\n"
-
-    f"Under no circumstances should you:\n"
-    f"- Ask for additional information or preferences after all inputs are received.\n"
-    f"- Delay generating the itinerary.\n"
-    f"- Use placeholder text for addresses.\n"
-    f"- Provide vague or imprecise addresses.\n"
-)
-
-
-
-systemMessage = SystemMessagePromptTemplate.from_template(systemPrompt)
-messageHistory = MessagesPlaceholder(variable_name="messages")
-messagesList = []
+# Dependency for session management
+async def getOrCreateSession(sessionRequest: SessionRequest) -> tuple[str, SessionData]:
+    """
+    FastAPI dependency that either gets an existing session or creates a new one
+    """
+    sessionManager.cleanupExpiredSessions()
     
-@app.post("/api/chat/")
-async def chatResponse(message: UserMessage):
+    sessionId = sessionRequest.sessionId
+    if not sessionId or not sessionManager.sessionExists(sessionId):
+        sessionId = sessionManager.createSession()
+    
+    session = sessionManager.getSession(sessionId)
+    if not session:
+        raise HTTPException(status_code=500, detail="Failed to create or retrieve session")
+    
+    return sessionId, session
 
+# Updated request models
+class UserMessage(SessionRequest):
+    input: Union[str, Dict] 
+
+class UserInputModel(SessionRequest):
+    userInput: str
+
+class ChatRequest(BaseModel):
+    sessionId: str
+    entities: Dict[str, Any]  
+
+@app.post("/api/validate-session/")
+async def validateSession(sessionRequest: SessionRequest):
     try:
-        humanMessage = HumanMessagePromptTemplate.from_template("{input}")
-        
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                systemMessage, 
-                humanMessage,
-                messageHistory           
-            ]
-        )
+        sessionId = sessionRequest.sessionId
+        if not sessionId:
+            return JSONResponse(status_code=404, content={"valid": False})
 
-        # Add human message in message list
-        messagesList.append(HumanMessage(content=message.input))
+        session = sessionManager.getSession(sessionId)
+        if not session:
+            return JSONResponse(status_code=404, content={"valid": False})
 
-        # Generate the response using the chain
-        chain = prompt | llm
+        # Check if session has expired
+        currentTime = datetime.now()
+        if (currentTime - session.lastAccessed) > timedelta(minutes=sessionManager.expirationMinutes):
+            # Clean up expired session
+            del sessionManager._sessions[sessionId]
+            return JSONResponse(status_code=404, content={"valid": False})
 
-        response = chain.invoke(
-            {
-                "input": message.input, 
-                "messages": messagesList
-            }
-        )
-
-        itineraryContent = response.content
-
-        # Store response in message list
-        messagesList.append(AIMessage(content=response.content))
-
-        # Check if the response contains the itinerary
-        if "Your Itinerary" in itineraryContent:
-            # Extract itinerary content from response
-            print(f"content {itineraryContent}")
-
-            # Find all names in response
-            namePattern = r"\*\*Name:\*\*\s(.*?)(?=\n)"
-            names: list[str] = re.findall(namePattern, itineraryContent)
-
-            # Find all addresses in response
-            addressPattern = r"\*\*Address:\*\*\s(.*?)(?=\n)"
-            addresses: list[str] = re.findall(addressPattern, itineraryContent)
-
-            # Get coordinates and googlePlaceId of addresses
-            placesInfo = await getAllPlaceDetails(names, addresses)
-
-            # Places
-            places = []
-
-            # Assign attributes to each place
-            for id, (name, address, placeInfo) in enumerate(zip(names, addresses, placesInfo)):
-                place = {
-                    "id": id,
-                    "name": name,
-                    "isAirport": None,
-                    "address": address,
-                    "initialPlaceId": placeInfo['initialPlaceId'],
-                    "coordinates": placeInfo['coordinates'],
-                    "predictedLocation": placeInfo['placePrediction'],
-                    "details": placeInfo['details']
-                }
-                checkIfAirport(place)
-                places.append(place)
-
-            # Prepare response data
-            responseData = {
-                "itinerary": itineraryContent,
-                "places": places
-            }
-
-            routes = []
-
-            if len(places) >= 2:
-                # List of consecutive place pairs
-                consecutivePairs = []
-                for i in range(len(places) - 1):
-                    fromPlace = places[i]
-                    toPlace = places[i + 1]
-                    consecutivePairs.append((fromPlace, toPlace))
-
-                # Filter out pairs where both are airports
-                nonAirportPairs = []
-                for fromPlace, toPlace in consecutivePairs:
-                    if not (fromPlace.get("isAirport", False) and toPlace.get("isAirport", False)):
-                        nonAirportPairs.append((fromPlace, toPlace))
-
-                # Create route fetching tasks and keep track of pairs
-                routeTasks = []
-                routePairs = []
-
-                async with httpx.AsyncClient() as client:
-                    for fromPlace, toPlace in nonAirportPairs:
-                        task = getRouteFromMapbox(
-                            client,
-                            startCoords=fromPlace["coordinates"],
-                            endCoords=toPlace["coordinates"]
-                        )
-                        routeTasks.append(task)
-                        routePairs.append((fromPlace, toPlace))
-
-                    # Gather all route tasks
-                    route_results = await asyncio.gather(*routeTasks, return_exceptions=True)
-
-                # Add route pairs and routes
-                for index, result in enumerate(route_results):
-                    fromPlace, toPlace = routePairs[index]
-
-                    # Check for exception
-                    if isinstance(result, Exception):
-                        print(f"Failed to fetch route between {fromPlace['name']} and {toPlace['name']}: {result}")
-                        continue 
-                    
-                    # Append routes to list
-                    if result:
-                        routes.append({
-                            "from": {
-                                "id": fromPlace["id"],
-                                "name": fromPlace["name"],
-                                "coordinates": fromPlace["coordinates"]
-                            },
-                            "to": {
-                                "id": toPlace["id"],
-                                "name": toPlace["name"],
-                                "coordinates": toPlace["coordinates"]
-                            },
-                            "route": result 
-                        })
-                    else:
-                        print(f"No route found between {fromPlace['name']} and {toPlace['name']}.")
-
-            # Add routes to response 
-            responseData["routes"] = routes
-
-            #print(responseData)
-            # Return formatted response
-            botResponse = {"response": responseData}
-            return JSONResponse(content=botResponse)
-
-        # Return raw response 
-        botResponse = {"response": response.content}
-        return JSONResponse(content=botResponse)
-
+        return JSONResponse(content={"valid": True})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
-# Geocode list of addresses in parallel requests and fetches place details in parallel
-async def getAllPlaceDetails(names: list[str], addresses: list[str]):
-    async with httpx.AsyncClient() as client:
-        geocodeTasks = []
-        autoCompleteTasks = []
-        detailsTasks = []
-
-        # Geocode addresses to obtain coordinates and placeId 
-        for address in addresses:
-            geocodeTask = getCoordinatesGoogle(client, address)
-            geocodeTasks.append(geocodeTask)
-        geocodeResults = await asyncio.gather(*geocodeTasks)
-        # Obtain coordinates from geocoded addresses
-        coordinates = [geocodeResult['coordinates'] for geocodeResult in geocodeResults]
-        
-        # Use name and coordinates to fetch precise placeId
-        for name, coordinate in zip(names, coordinates):
-            autoCompleteTask = getPlaceFromAutocomplete(client, name, coordinate)
-            autoCompleteTasks.append(autoCompleteTask)
-        autoCompleteResults = await asyncio.gather(*autoCompleteTasks)
-
-        # Obtain new place IDs from queried locations
-        precisePlaceIds = []
-        for autoCompleteResult in autoCompleteResults:
-            if autoCompleteResult is not None:
-                precisePlaceIds.append(autoCompleteResult['precisePlaceId'])
-            else:
-                precisePlaceIds.append(None)
-
-        # Fetch place details using precisePlaceIds
-        for precisePlaceId in precisePlaceIds:
-            if precisePlaceId is not None:
-                detailsTask = getPlaceDetailsFromId(client, precisePlaceId)
-                detailsTasks.append(detailsTask)
-            else:
-                detailsTasks.append(None)
-        # Await all details tasks
-        detailsResults = []
-        for detailsTask in detailsTasks:
-            if detailsTask is not None:
-                detailsResult = await detailsTask
-                detailsResults.append(detailsResult)
-            else:
-                detailsResults.append(None)
-        
-        # Compile all results
-        results = []
-        for geocodeResult, autoCompleteResult, detailsResult in zip(geocodeResults, autoCompleteResults, detailsResults):
-            result = {
-                "initialPlaceId": geocodeResult['placeId'],
-                "coordinates": geocodeResult['coordinates'],
-                "placePrediction": autoCompleteResult,
-                "details": detailsResult
-            }
-            results.append(result)
-
-        print(f"geocoding results:\n{results}")
-    return results
-
-
-# Get lat, long, and place_id from Google Geocoding API
-async def getCoordinatesGoogle(client, address):
-    print(f"Address: {address}")
-    googleAPIKey = os.getenv("GOOGLE_API_KEY")
-    geocodeUrl = f"https://maps.googleapis.com/maps/api/geocode/json?address={address}&key={googleAPIKey}"
+@app.post("/api/clear-session/")
+async def clearSession(sessionRequest: SessionRequest):
     try:
-        response = await client.get(geocodeUrl)
-        if response.status_code == 200:
-            data = response.json()
-            if data["results"]:
-                location = data["results"][0]["geometry"]["location"]
-                placeId = data["results"][0]["place_id"]
-                #print(data["results"][0]["geometry"])
-                return {
-                    "coordinates": {
-                        "latitude": location["lat"],
-                        "longitude": location["lng"]
-                    },
-                    "placeId": placeId,
-                }
-            else:
-                print(f"No results found for address: {address}")
-                return None
-        else:
-            print(f"Error fetching coordinates for address {address}: {response.text}")
-            return None
+        sessionId = sessionRequest.sessionId
+        if sessionId and sessionId in sessionManager._sessions:
+            del sessionManager._sessions[sessionId]
+        return JSONResponse(content={"status": "success"})
     except Exception as e:
-        print(f"Exception occurred while fetching coordinates for address {address}: {e}")
-        return None
+        raise HTTPException(status_code=500, detail=str(e))
 
-# Get precise place ID from Google Autocomplete API 
-async def getPlaceFromAutocomplete(client, input, coordinates):
-    initialRadius = 5000
-    maxRadius = 20000
-    increment = 5000
+workflow = createTravelPreferenceWorkflow()   
 
-    apiKey = os.getenv("GOOGLE_API_KEY")
-    autocompleteUrl = "https://places.googleapis.com/v1/places:autocomplete"
-    headers = {
-        'Content-Type': 'application/json',
-        'X-Goog-Api-Key': apiKey,
-        'X-Goog-FieldMask': "*"
-    }
-    
-    """ body = {
-        "input": input,
-    }
- """
-    radius = initialRadius
-    while radius <= maxRadius:
-        body = {
-            "input": input,
-            "locationRestriction": {
-                "circle": {
-                    "center": {
-                        "latitude": coordinates['latitude'],
-                        "longitude": coordinates['longitude']
-                    },
-                "radius": radius
-                }
-            }
+@app.post("/api/extract-preferences/")
+async def extractTravelPreferences(inputData: UserInputModel):
+    try:
+        sessionId, session = await getOrCreateSession(inputData)  # Pass the inputData directly
+        
+        config = {"configurable": {"thread_id": f"pref_{sessionId}"}}
+        
+        initialInput = {
+            'userInput': inputData.userInput,
+            'previousEntities': session.entities
         }
-
-        response = await client.post(autocompleteUrl, headers=headers, json=body)
-        print(f"Attempting input {input} with coordinates {coordinates['latitude']}, {coordinates['longitude']}, radius {radius}")
-        if response.status_code == 200 and response.content:
-            try:
-                data = response.json()
-            except Exception as e:
-                print(f"Exception occurred while parsing JSON response: {e}")
-                radius += increment
-                continue
-            # Check if suggestions key exists
-            suggestions = data.get('suggestions', [])
-            if suggestions:
-                prediction = suggestions[0]["placePrediction"]
-                return {
-                    "precisePlaceId": prediction["placeId"],
-                    "text": prediction['text']['text']
-                }
-            else:
-                print(f"No results found for query {input} with radius: {radius}m")
-                radius += increment
-        else:
-            print(f"Error fetching results for query {input}: {response.text}")
-            break
-
-    # Attempt without location restriction 
-    body = {
-        "input": input,
-    }
-
-    response = await client.post(autocompleteUrl, headers=headers, json=body)
-    print(f"FALLBACK: Attempting input {input} with no coordinates")
-    if response.status_code == 200:
-        try:
-            data = response.json()
-        except Exception as e:
-            print(f"Exception occurred while parsing JSON response in fallback: {e}")
-            return None
-        # Check if suggestions key exists
-        suggestions = data.get('suggestions', [])
-        if suggestions:
-            prediction = suggestions[0]["placePrediction"]
-            return {
-                "precisePlaceId": prediction["placeId"],
-                "text": prediction['text']['text']
-            }
-        else:
-            print(f"No results found for query {input} with no radius restriction.")
-            return None
-    else:
-        print(f"Error fetching fallback results for query {input}: {response.text}")
-        return None
-    
-# Get place details from Google Place Details API using Place ID
-async def getPlaceDetailsFromId(client, placeId):
-    googleAPIKey = os.getenv("GOOGLE_API_KEY")
-    if not googleAPIKey:
-        logger.error("Google API key is not set in the environment variables.")
-        raise ValueError("Missing Google API key.")
-    fields = "id,displayName,primaryType,primaryTypeDisplayName,types,websiteUri,googleMapsUri,internationalPhoneNumber,nationalPhoneNumber,containingPlaces,viewport"
-    headers = {
-        'Content-Type': 'application/json',
-        'X-Goog-Api-Key': googleAPIKey,
-        'X-Goog-FieldMask': fields
-    }
-    placeDetailsUrl = f"https://places.googleapis.com/v1/places/{placeId}"
-    try:
-        response = await client.get(placeDetailsUrl, headers=headers)
-        if response.status_code == 200:
-            result = response.json()
-            print(f"RESPONSE:{result}")
-            if result is not None:
-                ## TODO: Use new fields 
-                return {
-                    "id": result.get("id"),
-                    "displayName": result.get("displayName"),
-                    "primaryType": result.get("primaryType"),
-                    "primaryTypeDisplayName": result.get("primaryTypeDisplayName"),
-                    "types": result.get("types"),
-                    "websiteUri": result.get("websiteUri"),
-                    "googleMapsUri": result.get("googleMapsUri"),
-                    "internationalPhoneNumber": result.get("internationalPhoneNumber"),
-                    "nationalPhoneNumber": result.get("nationalPhoneNumber"),
-                    "viewport": result.get("viewport"),
-                }
-            else:
-                print(f"No result found for placeId: {placeId}")
-                return None
-        else:
-            print(f"Error fetching place details for placeId {placeId}: {response.text}")
-            return None
+        
+        result = workflow.invoke(initialInput, config=config)
+        
+        # Update session entities
+        session.entities = result.get('extractedEntities', {})
+        
+        return {
+            "sessionId": sessionId,
+            "extractedEntities": result.get('extractedEntities', {}),
+            "missingEntities": result.get('missingEntities', []),
+            "isComplete": result.get('isComplete', False),
+            "clarificationMessage": result.get('clarificationMessage', ""),
+        }
     except Exception as e:
-        print(f"Exception occurred while fetching place details for placeId: {placeId}: {e}")
-        return None
+        raise HTTPException(status_code=500, detail=str(e))
 
-# Assigns isAirport attribute of place
-def checkIfAirport(place):
-    placeDetails = place["details"]
-    if placeDetails is not None:
-        primaryType = placeDetails.get("primaryType")
-        types = placeDetails.get("types", [])
-        if primaryType == "international_airport" or "international_airport" in types or "airport" in types:
-            place["isAirport"] = True
-        else:
-            place["isAirport"] = False
-    else:
-        place["isAirport"] = False
+responseFormat = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "itinerary",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "day": {"type": "integer"},
+                            "places": {
+                                "type": "array",
+                                "items": {  
+                                    "type": "object",
+                                    "properties": {
+                                        "name": { "type": "string" },
+                                        "address": { "type": "string" },
+                                        "description": { "type": "string" },
+                                    },
+                                    "required": ["name", "address", "description"],
+                                    "additionalProperties": False
+                                }
+                            },
+                            "summaryOfDay": {"type": "string"}
+                        },
+                        "required": ["day","places","summaryOfDay"],
+                        "additionalProperties": False                       
+                    }              
+                },
+                "budgetBreakdown": {"type": "string"},
+                "completionMessage": {"type": "string"}
+            },
+            "required": ["days", "budgetBreakdown", "completionMessage"],
+            "additionalProperties": False
+        },
+        "strict": True,
+    }
+}
+
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    temperature=0.5,
+    max_tokens=1500,
+    timeout=None,
+    max_retries=2,
+    api_key=os.getenv("OPENAI_API_KEY"),
+    response_format=responseFormat
+)
+
+## Implement different budget options, don't have to ask for budget
+
+systemPromptShort = (
+    f"You are a travel agent. Your job is to generate a complete itinerary based on the parameters given by the user."
+
+    f"CRITICAL PLACE NAMING RULES:\n"
+    f"1. Place names MUST be ONLY the official establishment or venue name:\n"
+    f"   CORRECT: 'Museum of Modern Art'\n"
+    f"   INCORRECT: 'Visit Museum of Modern Art'\n"
+    f"   INCORRECT: 'Morning at Museum of Modern Art'\n"
+    f"   INCORRECT: 'Back to Hotel'\n\n"
+    
+    f"2. Never include actions, times, or instructions in place names:\n"
+    f"   CORRECT: 'Central Station'\n"
+    f"   INCORRECT: 'Depart from Central Station'\n"
+    f"   INCORRECT: 'Morning Coffee'\n"
+    f"   INCORRECT: 'Walk to Park'\n\n"
+    
+    f"3. Every address MUST be an exact, real address. Do not use placeholders or approximate locations.\n\n"
+    
+    f"4. Put all activities, timing, and instructions in the description field ONLY:\n"
+    f"   Name: 'Pike Place Market'\n"
+    f"   Description: 'Start your morning exploring this historic market. Sample local delicacies and watch fish-throwing demonstrations.'\n\n"
+    
+    f"5. Names must be actual physical locations that can be found on Google Maps:\n"
+    f"   CORRECT: 'Space Needle'\n"
+    f"   INCORRECT: 'Lunch Break'\n"
+    f"   INCORRECT: 'Free Time'\n"
+    f"   INCORRECT: 'Return Journey'\n\n"
+
+    f" Use present tense in each daySummary. Use imperative writing appropriate for itineraries. Do not use future tense.\n"
+    f"In your budgetBreakdown in your response, include a comprehensive description of how the budget is distributed throughout the trip.\n"
+    f"Your completionMessage should provide a brief completion message that:\n"
+    f"   - Acknowledges the itinerary is ready\n"
+    f"   - Names the main destination(s)\n"
+    f"   - Encourages the user to explore the map\n"
+)
+
+systemMessage = SystemMessagePromptTemplate.from_template(systemPromptShort)
+messageHistory = MessagesPlaceholder(variable_name="messages")
+messagesList = []    
+
+@app.post("/api/chat/")
+async def chatResponse(message: ChatRequest):
+    try:
+        print(f"Raw message received: {message}")
+        sessionId, session = await getOrCreateSession(message)
+        
+        # Get stored entities from session
+        stored_entities = session.entities
+        print(f"Stored entities from session: {stored_entities}")
+
+        # Prepare the chat prompt
+        humanMessage = HumanMessagePromptTemplate.from_template("{input}")
+        prompt = ChatPromptTemplate.from_messages([
+            systemMessage,
+            humanMessage,
+            messageHistory
+        ])
+
+        # Use stored entities if available, otherwise use input
+        # Use entities directly without checking if it's a dict
+        entities = stored_entities if stored_entities else message.entities
+        formatted_input = (
+            f"Please create an itinerary for {entities.get('duration', 'N/A')} "
+            f"in {entities.get('destinations', 'N/A')} "
+            f"for {entities.get('numTravellers', '1')} traveler(s) "
+            f"with a budget of {entities.get('budget', 'N/A')}. "
+            f"Start date: {entities.get('startDate', 'N/A')}. "
+            f"{'Includes children. ' if entities.get('includesChildren') == 'true' else ''}"
+            f"{'Includes pets. ' if entities.get('includesPets') == 'true' else ''}"
+        )
+
+        print(f"Formatted input for LLM: {formatted_input}")
+        
+        session.chatHistory.append(HumanMessage(content=str(formatted_input)))
+        
+        chain = prompt | llm
+        response = chain.invoke({
+            "input": formatted_input,
+            "messages": session.chatHistory
+        })
+
+
+        if not response.content or not response.content.strip():
+            raise HTTPException(status_code=500, detail="Empty or null JSON response.")
+
+        try:
+            itineraryContent = json.loads(response.content)
+            
+            # Validate itinerary structure
+            for day in itineraryContent.get("days", []):
+                if "day" not in day or "places" not in day or not isinstance(day["places"], list):
+                    raise HTTPException(status_code=500, detail="Missing or invalid structure in 'days' element.")
+
+            # Store response in session chat history
+            session.chatHistory.append(AIMessage(content=response.content))
+            
+            # Process places and calculate routes
+            places = await processItineraryPlaces(itineraryContent)
+            if not places:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Unable to process location details"
+            )
+
+            # Merge place details and routes into itinerary content
+            mergedItinerary = await mergePlaceDetailsIntoItinerary(itineraryContent, places)
+            finalItinerary = await calculateDailyRoutes(mergedItinerary)
+
+            # Format response
+            responseData = {
+                "sessionId": sessionId,  
+                "itinerary": finalItinerary,
+                "places": places,
+            }
+
+            return JSONResponse(content={"response": responseData})
+
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error processing request: {str(e)}"
+            )
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+async def mergePlaceDetailsIntoItinerary(itineraryContent, places):
+    # Create map of name and address to place details
+    placeDetailsMap = {
+        (place["name"], place["address"]): {
+            key: value for key, value in place.items() 
+            if key not in ["name", "address"]
+        }
+        for place in places
+    }
+    
+    # Iterate through each day and place in itinerary
+    for day in itineraryContent["days"]:
+        for place in day["places"]:
+            # Look up details using name and address as key
+            details = placeDetailsMap.get((place["name"], place["address"]), {})
+            # Update place with place details
+            place.update(details)
+    
+    return itineraryContent    
+    
+async def processItineraryPlaces(itinerary_content: Dict) -> List[Dict]:
+    """Extract and process place information from itinerary content."""
+
+    print(f"itineraryOnlyContent{itinerary_content}")
+    names = []
+    addresses = []
+    for day in itinerary_content["days"]:
+        for place in day["places"]:
+            names.append(place["name"])
+            addresses.append(place["address"])
+
+    # Get coordinates and googlePlaceId of addresses
+    places_info = await getAllPlaceDetails(names, addresses)
+    
+    places = []
+    # Assign attributes to each place
+    for id, (name, address, place_info) in enumerate(zip(names, addresses, places_info)):
+        place = {
+            "id": id,
+            "name": name,
+            "isAirport": None,
+            "address": address,
+            "initialPlaceId": place_info['initialPlaceId'],
+            "coordinates": place_info['coordinates'],
+            "predictedLocation": place_info['placePrediction'],
+            "details": place_info['details'],
+            "photoUri": place_info['photoUri']
+        }
+        checkIfAirport(place)
+        places.append(place)
+    
+    return places
+
+# Obtains and generates all routes in parallel using Mapbox Route API and organize them by day 
+async def calculateDailyRoutes(itineraryContent: Dict) -> Dict:
+    
+    # Collect all place pairs and respective day
+    allPairs = []
+    dayIndices = []  # Keep track of which day each pair belongs to
+    
+    for dayIndex, day in enumerate(itineraryContent["days"]):
+        places = day["places"]
+        if len(places) < 2:
+            continue
+            
+        # Create pairs of consecutive places for a day
+        dayPairs = [(places[i], places[i + 1]) 
+                    for i in range(len(places) - 1)]
+        
+        # Filter out airport-to-airport pairs
+        nonAirportPairs = [
+            (fromPlace, toPlace) for fromPlace, toPlace in dayPairs
+            if not (fromPlace.get("isAirport", False) and 
+                   toPlace.get("isAirport", False))
+        ]
+        
+        allPairs.extend(nonAirportPairs)
+        dayIndices.extend([dayIndex] * len(nonAirportPairs))
+
+    # Calculate all routes in parallel
+    async with httpx.AsyncClient() as client:
+        routeTasks = [
+            getRouteFromMapbox(
+                client,
+                startCoords=fromPlace["coordinates"],
+                endCoords=toPlace["coordinates"]
+            )
+            for fromPlace, toPlace in allPairs
+        ]
+        
+        routeResults = await asyncio.gather(*routeTasks, return_exceptions=True)
+        
+        # Initialize empty routes list for each day
+        for day in itineraryContent["days"]:
+            day["routes"] = []
+        
+        # Process results and organize by day
+        for (fromPlace, toPlace), result, dayIndex in zip(allPairs, routeResults, dayIndices):
+            if isinstance(result, Exception):
+                print(f"Failed to fetch route between {fromPlace['name']} "
+                      f"and {toPlace['name']}: {result}")
+                continue
+            
+            if result:
+                route = {
+                    "from": {
+                        "id": fromPlace.get("id"),
+                        "name": fromPlace["name"],
+                        "coordinates": fromPlace["coordinates"]
+                    },
+                    "to": {
+                        "id": toPlace.get("id"),
+                        "name": toPlace["name"],
+                        "coordinates": toPlace["coordinates"]
+                    },
+                    "route": result
+                }
+                itineraryContent["days"][dayIndex]["routes"].append(route)
+            else:
+                print(f"No route found between {fromPlace['name']} "
+                      f"and {toPlace['name']}.")
+    return itineraryContent
+
 
 # Get place type and details from Google Text Search API
 async def getPlaceDetailsFromText(client, textQuery):
@@ -518,7 +516,7 @@ async def getPlaceDetailsFromText(client, textQuery):
                         "rating": place["rating"],
                         #"photos": places['photos']
                     })
-                print(f"results: {results}")
+                #print(f"results: {results}")
                 return results
             else:
                 print(f"No places found for query: {textQuery}")
