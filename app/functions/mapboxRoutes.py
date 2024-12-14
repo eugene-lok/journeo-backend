@@ -1,9 +1,6 @@
 import os
 import httpx
 
-from dotenv import load_dotenv
-load_dotenv()
-
 MAPBOX_ACCESS_TOKEN = os.getenv("MAPBOX_ACCESS_TOKEN")
 
 async def getRouteFromMapbox(client: httpx.AsyncClient, startCoords, endCoords):
