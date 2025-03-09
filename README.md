@@ -3,7 +3,7 @@
 ---
 
 ## About
-This is the backend for Journeo, an advanced LLM-based travel itinerary planner. It leverages OpenAI's GPT models, Google Places API, and Mapbox GL JS to generate personalized, intelligent travel itineraries with precise geolocation details.
+This is the backend for Journeo, an advanced LLM-based travel itinerary planner. It leverages OpenAI's GPT models through LangGraph, Google Places API, and Mapbox GL JS to generate personalized, intelligent travel itineraries with precise geolocation details.
 
 ### Key Features:
 - **Intelligent Itinerary Generation**: Uses OpenAI's GPT to create personalized travel plans
@@ -18,7 +18,7 @@ Complementary frontend can be found in the [Journeo Frontend Repository](https:/
 ## Technologies Used 
 - **Python**
 - **FastAPI**
-- **LangChain**
+- **LangGraph**
 - **OpenAI GPT-4o**
 - **Google Places API**
 - **Mapbox Geocoding API**
@@ -89,7 +89,7 @@ For the client-side implementation, visit the [Journeo Frontend Repository](http
 - Handles complex, multi-turn conversations to gather trip details
 - Ensures comprehensive information collection
 
-### Itinerary Generation
+### Itinerary Generation 
 - Leverages OpenAI's GPT-4o for intelligent itinerary creation
 - Generates day-by-day travel plans with precise location details
 - Calculates budget breakdowns and provides comprehensive travel guidance
