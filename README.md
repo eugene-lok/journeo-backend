@@ -1,43 +1,60 @@
-# Journeo 
+# Journeo
 
 ---
 
 ## About
-This is the backend for Journeo, an LLM-based travel itinerary planner. It allows users to chat with an LLM chatbot to generate personalized travel itinerary with OpenAI's GPT. Locations from this itinerary are displayed on an interactive map. 
+This is the backend for Journeo, an advanced LLM-based travel itinerary planner. It leverages OpenAI's GPT models, Google Places API, and Mapbox GL JS to generate personalized, intelligent travel itineraries with precise geolocation details.
 
 ### Key Features:
-- Integrates OpenAI's API for dynamic itinerary generation based on user input.
-- Utilizes Google's Geocoding API and Places API to asynchronously geocode and obtain details for each place generated.
+- **Intelligent Itinerary Generation**: Uses OpenAI's GPT to create personalized travel plans
+- **Preference Extraction**: Advanced agent-based system to understand and extract user travel preferences
+- **Geocoding Services**: Integrates Google's Geocoding and Places APIs to get precise location details
+- **Route Calculation**: Uses Mapbox Directions API to calculate routes between destinations
+
+Complementary frontend can be found in the [Journeo Frontend Repository](https://github.com/eugene-lok/journeo-frontend).
+
 ---
 
 ## Technologies Used 
-- **Python** 
+- **Python**
 - **FastAPI**
+- **LangChain**
+- **OpenAI GPT-4o**
+- **Google Places API**
 - **Mapbox Geocoding API**
+
 ---
 
 ## Setup / Installation 
 
-**Note:** This is only the backend of the application. You will need to set up and run the [frontend](https://github.com/eugene-lok/journeo-frontend) as well for full functionality.
-1. Create a Mapbox account and obtain a [Mapbox access token](https://docs.mapbox.com/help/getting-started/access-tokens/).
+**Note:** This is the backend component of Journeo. You must also set up the [Journeo Frontend](https://github.com/eugene-lok/journeo-frontend) for a complete application experience.
 
-2. Create an OpenAI account and obtain an [OpenAI API Key](https://platform.openai.com/api-keys).
+1. Prerequisites:
+   - Python 3.8+
+   - OpenAI Account
+   - Google Cloud Platform Account
+   - Mapbox Account
+
+2. Obtain necessary API keys:
+   - [Mapbox access token](https://docs.mapbox.com/help/getting-started/access-tokens/)
+   - [OpenAI API Key](https://platform.openai.com/api-keys)
+   - [Google Cloud API Key with Places API enabled](https://developers.google.com/maps/gmp-get-started)
 
 3. Clone the repository:
     ```bash
     git clone https://github.com/eugene-lok/journeo-backend.git
+    cd journeo-backend
     ```
 
-4. Create a virtual environment in the root of the project:
+4. Create a virtual environment:
     ```bash
     python3 -m venv env
-    ```
-    - *On Linux/Mac:*
-    ```bash
+    
+    # Activate the environment
+    # On Linux/Mac:
     source env/bin/activate
-    ```
-    - *On Windows:*
-    ```bash
+    
+    # On Windows:
     \env\Scripts\activate
     ```
 
@@ -47,10 +64,12 @@ This is the backend for Journeo, an LLM-based travel itinerary planner. It allow
     ```
 
 6. Set up environment variables:
-    - Create a `.env` file in the root of your project with the following keys:
+    - Create a `.env` file in the root of your project
+    - Add the following keys:
     ```bash
     MAPBOX_ACCESS_TOKEN=your_mapbox_access_token
     OPENAI_API_KEY=your_openai_api_key
+    GOOGLE_API_KEY=your_google_api_key
     ```
 
 7. Run the FastAPI server:
@@ -58,6 +77,24 @@ This is the backend for Journeo, an LLM-based travel itinerary planner. It allow
     uvicorn app.main:app --reload
     ```
 
-8. The API will be accessible on `http://localhost:8000`. Ensure the frontend has been setup and is running as well. 
+8. The API will be accessible on `http://localhost:8000`
 
----
+## Frontend Repository
+For the client-side implementation, visit the [Journeo Frontend Repository](https://github.com/eugene-lok/journeo-frontend).
+
+## Key Components
+
+### Preference Extraction Agent
+- Uses LangGraph to create a state-based workflow for extracting travel preferences
+- Handles complex, multi-turn conversations to gather trip details
+- Ensures comprehensive information collection
+
+### Itinerary Generation
+- Leverages OpenAI's GPT-4o for intelligent itinerary creation
+- Generates day-by-day travel plans with precise location details
+- Calculates budget breakdowns and provides comprehensive travel guidance
+
+### Geocoding and Route Services
+- Uses Google Places API to get detailed location information
+- Retrieves coordinates, place details, and photos
+- Calculates routes between destinations using Mapbox Directions API
