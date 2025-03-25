@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from langchain_openai import ChatOpenAI
 from langchain.prompts import (
@@ -8,15 +8,12 @@ from langchain.prompts import (
     MessagesPlaceholder
 )
 
-from langchain.schema import AIMessage, HumanMessage, SystemMessage
+from langchain.schema import AIMessage, HumanMessage
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Union
-from functools import wraps
 
-from app.models import UserItinerary, UserMessage
 from app.middleware import addCorsMiddleware
-from app.loggerConfig import logger
 from app.functions.geocoding import *
 from app.functions.mapboxRoutes import getRouteFromMapbox
 from app.extractorAgent import createTravelPreferenceWorkflow
@@ -26,11 +23,6 @@ import httpx
 import asyncio
 import json
 import uuid
-
-
-# Configure logging
-#logging.basicConfig(level=logging.INFO)
-#logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
