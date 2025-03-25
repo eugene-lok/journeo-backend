@@ -1,9 +1,10 @@
+import os
 from fastapi.middleware.cors import CORSMiddleware
 
 def addCorsMiddleware(app):
     origins = [
-        "https://journeo-frontend-zeta.vercel.app",  
-        "http://localhost:3000",             # Local 
+        os.getenv("PRODUCTION_ORIGIN"),  
+        os.getenv("LOCAL_ORIGIN"),             # Local 
     ]
     app.add_middleware(
         CORSMiddleware,
