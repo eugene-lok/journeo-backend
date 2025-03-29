@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from datetime import datetime, timedelta
 from typing import Dict, List
 
+from app.routes import sessionRoutes
 from app.models import SessionRequest, UserMessage, UserInputModel, ChatRequest, SessionData, SessionManager
 from app.middleware import addCorsMiddleware
 from app.functions.geocoding import *
@@ -29,6 +30,8 @@ app = FastAPI()
 
 # Apply CORS middleware
 addCorsMiddleware(app)
+
+app.include_router(sessionRoutes.router)
 
 # Create global session manager
 sessionManager = SessionManager()
@@ -50,7 +53,7 @@ async def getOrCreateSession(sessionRequest: SessionRequest) -> tuple[str, Sessi
     
     return sessionId, session
 
-@app.post("/api/validate-session/")
+""" @app.post("/api/validate-session/")
 async def validateSession(sessionRequest: SessionRequest):
     try:
         sessionId = sessionRequest.sessionId
@@ -81,7 +84,7 @@ async def clearSession(sessionRequest: SessionRequest):
         return JSONResponse(content={"status": "success"})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+ """
 workflow = createTravelPreferenceWorkflow()   
 
 @app.post("/api/extract-preferences/")
