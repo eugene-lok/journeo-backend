@@ -1,0 +1,56 @@
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
+from datetime import datetime, timedelta
+
+from app.models import SessionRequest, SessionData
+from app.services.sessionService import sessionManager
+
+router = APIRouter(prefix="/api", tags=["Sessions"])
+
+async def getOrCreateSession(sessionRequest: SessionRequest) -> tuple[str, SessionData]:
+    """
+    FastAPI dependency that either gets an existing session or creates a new one
+    """
+    sessionManager.cleanupExpiredSessions()
+    
+    sessionId = sessionRequest.sessionId
+    if not sessionId or not sessionManager.sessionExists(sessionId):
+        sessionId = sessionManager.createSession()
+    
+    session = sessionManager.getSession(sessionId)
+    if not session:
+        raise HTTPException(status_code=500, detail="Failed to create or retrieve session")
+    
+    return sessionId, session
+
+@router.post("/validate-session/")
+async def validateSession(sessionRequest: SessionRequest):
+    try:
+        sessionId = sessionRequest.sessionId
+        if not sessionId:
+            return JSONResponse(status_code=404, content={"valid": False})
+
+        session = sessionManager.getSession(sessionId)
+        if not session:
+            return JSONResponse(status_code=404, content={"valid": False})
+
+        # Check if session has expired
+        currentTime = datetime.now()
+        if (currentTime - session.lastAccessed) > timedelta(minutes=sessionManager.expirationMinutes):
+            # Clean up expired session
+            del sessionManager._sessions[sessionId]
+            return JSONResponse(status_code=404, content={"valid": False})
+
+        return JSONResponse(content={"valid": True})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/clear-session/")
+async def clearSession(sessionRequest: SessionRequest):
+    try:
+        sessionId = sessionRequest.sessionId
+        if sessionId and sessionId in sessionManager._sessions:
+            del sessionManager._sessions[sessionId]
+        return JSONResponse(content={"status": "success"})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

@@ -13,7 +13,9 @@ from pydantic import BaseModel
 from datetime import datetime, timedelta
 from typing import Dict, List
 
-from app.models import SessionRequest, UserMessage, UserInputModel, ChatRequest, SessionData, SessionManager
+from app.routes import sessionRoutes
+from app.models import SessionRequest, UserMessage, UserInputModel, ChatRequest, SessionData
+from app.services.sessionService import getOrCreateSession
 from app.middleware import addCorsMiddleware
 from app.functions.geocoding import *
 from app.functions.mapboxRoutes import getRouteFromMapbox
@@ -23,34 +25,16 @@ import os
 import httpx
 import asyncio
 import json
-import uuid
 
 app = FastAPI()
+app.include_router(sessionRoutes.router)
 
 # Apply CORS middleware
 addCorsMiddleware(app)
 
-# Create global session manager
-sessionManager = SessionManager()
 
-# Dependency for session management
-async def getOrCreateSession(sessionRequest: SessionRequest) -> tuple[str, SessionData]:
-    """
-    FastAPI dependency that either gets an existing session or creates a new one
-    """
-    sessionManager.cleanupExpiredSessions()
-    
-    sessionId = sessionRequest.sessionId
-    if not sessionId or not sessionManager.sessionExists(sessionId):
-        sessionId = sessionManager.createSession()
-    
-    session = sessionManager.getSession(sessionId)
-    if not session:
-        raise HTTPException(status_code=500, detail="Failed to create or retrieve session")
-    
-    return sessionId, session
 
-@app.post("/api/validate-session/")
+""" @app.post("/api/validate-session/")
 async def validateSession(sessionRequest: SessionRequest):
     try:
         sessionId = sessionRequest.sessionId
@@ -81,7 +65,7 @@ async def clearSession(sessionRequest: SessionRequest):
         return JSONResponse(content={"status": "success"})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+ """
 workflow = createTravelPreferenceWorkflow()   
 
 @app.post("/api/extract-preferences/")
