@@ -7,22 +7,6 @@ from app.services.sessionService import sessionManager
 
 router = APIRouter(prefix="/api", tags=["Sessions"])
 
-async def getOrCreateSession(sessionRequest: SessionRequest) -> tuple[str, SessionData]:
-    """
-    FastAPI dependency that either gets an existing session or creates a new one
-    """
-    sessionManager.cleanupExpiredSessions()
-    
-    sessionId = sessionRequest.sessionId
-    if not sessionId or not sessionManager.sessionExists(sessionId):
-        sessionId = sessionManager.createSession()
-    
-    session = sessionManager.getSession(sessionId)
-    if not session:
-        raise HTTPException(status_code=500, detail="Failed to create or retrieve session")
-    
-    return sessionId, session
-
 @router.post("/validate-session/")
 async def validateSession(sessionRequest: SessionRequest):
     try:
