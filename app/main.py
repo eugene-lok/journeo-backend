@@ -11,8 +11,11 @@ from langchain.prompts import (
 from langchain.schema import AIMessage, HumanMessage
 from pydantic import BaseModel
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, List
 
+from app.routes import sessionRoutes
+from app.models import SessionRequest, UserMessage, UserInputModel, ChatRequest, SessionData
+from app.services.sessionService import getOrCreateSession
 from app.middleware import addCorsMiddleware
 from app.functions.geocoding import *
 from app.functions.mapboxRoutes import getRouteFromMapbox
@@ -22,93 +25,16 @@ import os
 import httpx
 import asyncio
 import json
-import uuid
 
 app = FastAPI()
+app.include_router(sessionRoutes.router)
 
 # Apply CORS middleware
 addCorsMiddleware(app)
 
-class SessionData:
-    def __init__(self):
-        self.lastAccessed = datetime.now()
-        self.createdAt = datetime.now()
-        self.preferences = {}  # For travel preferences
-        self.chatHistory = []  # For chat messages
-        self.entities = {}     # For extracted entities
 
-# Session manager class
-class SessionManager:
-    def __init__(self, expirationMinutes: int = 30):
-        self._sessions: Dict[str, SessionData] = {}
-        self.expirationMinutes = expirationMinutes
 
-    def createSession(self) -> str:
-        sessionId = str(uuid.uuid4())
-        self._sessions[sessionId] = SessionData()
-        return sessionId
-
-    def getSession(self, sessionId: str) -> Optional[SessionData]:
-        session = self._sessions.get(sessionId)
-        if session:
-            session.lastAccessed = datetime.now()
-        return session
-
-    def sessionExists(self, sessionId: str) -> bool:
-        return sessionId in self._sessions
-
-    def updateSession(self, sessionId: str, updateFunc) -> None:
-        """
-        Update session using a callback function
-        """
-        if session := self.getSession(sessionId):
-            updateFunc(session)
-
-    def cleanupExpiredSessions(self) -> None:
-        currentTime = datetime.now()
-        expired = [
-            sessionId for sessionId, data in self._sessions.items()
-            if (currentTime - data.lastAccessed) > timedelta(minutes=self.expirationMinutes)
-        ]
-        for sessionId in expired:
-            del self._sessions[sessionId]
-
-# Create global session manager
-sessionManager = SessionManager()
-
-# Base model for requests that include sessionId
-class SessionRequest(BaseModel):
-    sessionId: Optional[str] = None
-
-# Dependency for session management
-async def getOrCreateSession(sessionRequest: SessionRequest) -> tuple[str, SessionData]:
-    """
-    FastAPI dependency that either gets an existing session or creates a new one
-    """
-    sessionManager.cleanupExpiredSessions()
-    
-    sessionId = sessionRequest.sessionId
-    if not sessionId or not sessionManager.sessionExists(sessionId):
-        sessionId = sessionManager.createSession()
-    
-    session = sessionManager.getSession(sessionId)
-    if not session:
-        raise HTTPException(status_code=500, detail="Failed to create or retrieve session")
-    
-    return sessionId, session
-
-# Updated request models
-class UserMessage(SessionRequest):
-    input: Union[str, Dict] 
-
-class UserInputModel(SessionRequest):
-    userInput: str
-
-class ChatRequest(BaseModel):
-    sessionId: str
-    entities: Dict[str, Any]  
-
-@app.post("/api/validate-session/")
+""" @app.post("/api/validate-session/")
 async def validateSession(sessionRequest: SessionRequest):
     try:
         sessionId = sessionRequest.sessionId
@@ -139,7 +65,7 @@ async def clearSession(sessionRequest: SessionRequest):
         return JSONResponse(content={"status": "success"})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+ """
 workflow = createTravelPreferenceWorkflow()   
 
 @app.post("/api/extract-preferences/")

@@ -1,15 +1,30 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Union, Dict, Any
+from datetime import datetime, timedelta
+import uuid
 
-class UserItinerary(BaseModel):
-    origin: str
-    destinations: list[str]
-    duration: int
-    budget: int
+# Base model for requests that include sessionId
+class SessionRequest(BaseModel):
+    sessionId: Optional[str] = None
 
-class UserMessage(BaseModel):
-    input: str
+class UserMessage(SessionRequest):
+    input: Union[str, Dict] 
 
+# Eequest models
+class UserInputModel(SessionRequest):
+    userInput: str
+
+class ChatRequest(BaseModel):
+    sessionId: str
+    entities: Dict[str, Any]  
+
+class SessionData:
+    def __init__(self):
+        self.lastAccessed = datetime.now()
+        self.createdAt = datetime.now()
+        self.preferences = {}  # For travel preferences
+        self.chatHistory = []  # For chat messages
+        self.entities = {}     # For extracted entities
 class Coordinates(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
