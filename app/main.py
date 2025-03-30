@@ -1,3 +1,12 @@
+from app.services import getOrCreateSession as getCreateSession
+from app.routes import sessionRoutes
+from app.models import SessionRequest, UserMessage, UserInputModel, ChatRequest, SessionData
+
+from app.middleware import addCorsMiddleware
+from app.functions.geocoding import *
+from app.functions.mapboxRoutes import getRouteFromMapbox
+from app.extractorAgent import createTravelPreferenceWorkflow
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from langchain_openai import ChatOpenAI
@@ -12,14 +21,6 @@ from langchain.schema import AIMessage, HumanMessage
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 from typing import Dict, List
-
-from app.routes import sessionRoutes
-from app.models import SessionRequest, UserMessage, UserInputModel, ChatRequest, SessionData
-from app.services.sessionService import getOrCreateSession
-from app.middleware import addCorsMiddleware
-from app.functions.geocoding import *
-from app.functions.mapboxRoutes import getRouteFromMapbox
-from app.extractorAgent import createTravelPreferenceWorkflow
 
 import os
 import httpx
@@ -71,7 +72,7 @@ workflow = createTravelPreferenceWorkflow()
 @app.post("/api/extract-preferences/")
 async def extractTravelPreferences(inputData: UserInputModel):
     try:
-        sessionId, session = await getOrCreateSession(inputData)  # Pass the inputData directly
+        sessionId, session = await getCreateSession(inputData)  # Pass the inputData directly
         
         config = {"configurable": {"thread_id": f"pref_{sessionId}"}}
         
@@ -189,11 +190,13 @@ systemMessage = SystemMessagePromptTemplate.from_template(systemPromptShort)
 messageHistory = MessagesPlaceholder(variable_name="messages")
 messagesList = []    
 
+
+
 @app.post("/api/chat/")
 async def chatResponse(message: ChatRequest):
     try:
         print(f"Raw message received: {message}")
-        sessionId, session = await getOrCreateSession(message)
+        sessionId, session = await getCreateSession(message)
         
         # Get stored entities from session
         stored_entities = session.entities
