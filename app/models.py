@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional, Union, Dict, Any
 from datetime import datetime, timedelta
+import uuid
 
 # Base model for requests that include sessionId
 class SessionRequest(BaseModel):
