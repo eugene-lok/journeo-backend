@@ -1,3 +1,5 @@
+
+
 itineraryPrompt = (
     f"You are a travel agent. Your job is to generate a complete itinerary based on the parameters given by the user."
 
